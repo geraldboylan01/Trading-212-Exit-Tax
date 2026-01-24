@@ -1,0 +1,9 @@
+[
+  {
+    "type": "DEPOSIT",
+    "amount": 50000.0,
+    "currency": "EUR",
+    "reference": "40d2364d-84bd-487f-aab4-012f10c427bd",
+    "dateTime": "2020-05-11T17:55:09.000Z"
+  }
+]
