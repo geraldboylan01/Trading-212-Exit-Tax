@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Trading 212 Exit Tax – Ireland</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link rel="stylesheet" href="./styles.css" />
+
+  <!-- Chart.js (no build step) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">ET</div>
+      <div>
+        <div class="brand-title">Trading 212 Exit Tax</div>
+        <div class="brand-subtitle">
+          UCITS ETFs & index funds • deemed disposal tracking
+        </div>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <button id="btnReload" class="btn">Reload</button>
+    </div>
+  </header>
+
+  <!-- CONNECT VIEW -->
+  <main id="viewConnect" class="layout layout-single">
+    <section class="panel">
+      <div class="panel-header">
+        <h1>Connect Trading 212</h1>
+        <div class="summary">
+          Enter your API credentials to fetch holdings. (Phase 1 uses demo data but keeps the same flow.)
+        </div>
+      </div>
+
+      <div class="panel-body">
+        <div id="connectBanner" class="banner hidden"></div>
+
+        <div class="form form-wide">
+          <div class="field">
+            <label for="apiKey">API key</label>
+            <input id="apiKey" placeholder="Paste API key" autocomplete="off" />
+          </div>
+
+          <div class="field">
+            <label for="apiSecret">API secret</label>
+            <input id="apiSecret" placeholder="Paste API secret" autocomplete="off" />
+          </div>
+
+          <div class="row">
+            <label class="checkbox">
+              <input id="rememberDevice" type="checkbox" />
+              <span>Remember on this device</span>
+            </label>
+
+            <button id="btnFetchHoldings" class="btn btn-accent">Fetch holdings</button>
+          </div>
+
+          <div class="small">
+            Notes: This tool filters to ETFs/index funds using your ISIN mapping. Credentials are only stored locally if you choose “Remember”.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- OVERDUE QUESTIONS VIEW -->
+  <main id="viewOverdue" class="layout layout-single hidden">
+    <section class="panel">
+      <div class="panel-header">
+        <h1>Questions required</h1>
+        <div class="summary">
+          Some holdings appear to be past their deemed disposal date. To calculate exit tax, we need the last exit-tax details for those holdings.
+        </div>
+      </div>
+
+      <div class="panel-body">
+        <div class="banner banner-warn">
+          If you’re unsure about any of the answers below, consider seeking professional tax advice.
+        </div>
+
+        <div id="overdueList" class="overdue-list"></div>
+
+        <div class="row row-right">
+          <button id="btnOverdueContinue" class="btn btn-accent">Continue to dashboard</button>
+        </div>
+
+        <div class="small">
+          You can continue even if you leave some holdings incomplete — they will show as “Overdue” on the dashboard until answered.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- DASHBOARD VIEW -->
+  <main id="viewDashboard" class="layout hidden">
+    <!-- LEFT: Holdings + chart -->
+    <section class="panel">
+      <div class="panel-header">
+        <h1>Your holdings</h1>
+        <div id="summary" class="summary">Loading…</div>
+      </div>
+
+      <div id="overdueBanner" class="banner banner-danger hidden"></div>
+
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Fund</th>
+              <th>ISIN</th>
+              <th class="num">Value</th>
+              <th class="num">Gain/Loss</th>
+              <th>Next deemed disposal date</th>
+              <th class="num">Exit tax (if today)</th>
+            </tr>
+          </thead>
+          <tbody id="holdingsTbody"></tbody>
+        </table>
+      </div>
+
+      <div class="hint">
+        Click a holding to see the assumptions and how the estimate was calculated.
+      </div>
+
+      <div class="chart-wrap">
+        <div class="chart-title">Value vs estimated exit tax (if today)</div>
+        <canvas id="barChart" height="140"></canvas>
+        <div class="small">Overdue holdings show a value bar, but exit tax will not be estimated until overdue questions are answered.</div>
+      </div>
+    </section>
+
+    <!-- RIGHT: Assumptions + Selected holding calculation -->
+    <aside class="drawer">
+      <div class="drawer-header">
+        <div>
+          <div class="drawer-title">Assumptions & calculation</div>
+          <div class="drawer-subtitle" id="assumptionsSubtitle">Select a holding to view details</div>
+        </div>
+        <button id="btnClose" class="btn btn-ghost" title="Clear selection">✕</button>
+      </div>
+
+      <div id="drawerBody" class="drawer-body">
+        <div class="empty">
+          Select a holding to see how dates and tax are calculated.
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <div class="disclaimer">
+      Educational tool only. Not tax advice. Always confirm figures and dates before acting.
+    </div>
+  </footer>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
