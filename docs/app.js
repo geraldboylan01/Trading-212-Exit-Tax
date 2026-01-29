@@ -11,7 +11,9 @@ const state = {
   asOf: null,
   positions: [],
   instrumentByIsin: new Map(),
-  answersByIsin: new Map(), // { lastExitTaxDate: "YYYY-MM-DD", valueAtThatDate: number }
+  // Answers keyed by ISIN for deemed-disposal handling.
+  // { paidExitTax: boolean, deemedDisposalValue: number }
+  answersByIsin: new Map(),
   selectedIsin: null,
   rememberDevice: false,
   chart: null,
@@ -20,13 +22,21 @@ const state = {
 function $(id) { return document.getElementById(id); }
 
 function normalizeIsin(isin) {
-  return (isin || "").trim().toUpperCase();
+  if (isin == null) return "";
+  // Uppercase + remove ALL whitespace to be robust (Python does this too)
+  return String(isin).trim().toUpperCase().replace(/\s+/g, "");
 }
 
 function parseDateISO(s) {
   if (!s) return null;
-  const d = new Date(s + "T00:00:00");
-  return Number.isNaN(d.getTime()) ? null : d;
+  // Parse as UTC midnight to avoid timezone drift.
+  const m = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(String(s).trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo, d));
+  return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
 function fmtDate(d) {
@@ -34,15 +44,48 @@ function fmtDate(d) {
   return d.toISOString().slice(0, 10);
 }
 
-function addYears(d, years) {
-  const copy = new Date(d.getTime());
-  copy.setFullYear(copy.getFullYear() + years);
-  return copy;
+function isLeapYear(y) {
+  return (y % 4 === 0 && y % 100 !== 0) || (y % 400 === 0);
 }
 
-function money(n) {
+// Mirror Python _add_years(): Feb 29 -> Feb 28 on non-leap years.
+function addYearsSafeUTC(d, years) {
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth();
+  const day = d.getUTCDate();
+
+  const targetYear = y + years;
+  const isFeb29 = (m === 1 && day === 29);
+
+  const targetDay = (isFeb29 && !isLeapYear(targetYear)) ? 28 : day;
+  return new Date(Date.UTC(targetYear, m, targetDay));
+}
+
+function money(n, currency) {
   if (typeof n !== "number" || Number.isNaN(n)) return "—";
-  return new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(n);
+  if (currency && typeof currency === "string" && currency.length === 3) {
+    try {
+      return new Intl.NumberFormat("en-IE", { style: "currency", currency }).format(n);
+    } catch {
+      // fall through
+    }
+  }
+  return new Intl.NumberFormat("en-IE", { maximumFractionDigits: 2 }).format(n);
+}
+
+
+function ensureSegStyles() {
+  if (document.getElementById("segStyles")) return;
+  const style = document.createElement("style");
+  style.id = "segStyles";
+  style.textContent = `
+    .seg { display:flex; gap:10px; margin-top:10px; }
+    .seg-item { flex: 0 0 auto; display:flex; align-items:center; gap:10px; padding: 10px 14px; border-radius: 999px; border: 1px solid rgba(233,241,255,0.18); background: rgba(255,255,255,0.03); cursor:pointer; user-select:none; }
+    .seg-item input { position:absolute; opacity:0; pointer-events:none; }
+    .seg-item span { font-weight:800; color: var(--text); }
+    .seg-item:has(input:checked) { border-color: rgba(60,196,255,0.65); box-shadow: 0 0 0 3px rgba(60,196,255,0.12); background: rgba(60,196,255,0.08); }
+  `;
+  document.head.appendChild(style);
 }
 
 function show(el) { el.classList.remove("hidden"); }
@@ -93,44 +136,168 @@ function hydrateInstrumentDb(dbJson) {
 }
 
 function isExitTaxInstrument(isin) {
-  return state.instrumentByIsin.has(normalizeIsin(isin));
+  // Per project rule: if ISIN exists in our DB, treat as exit-tax instrument.
+  const norm = normalizeIsin(isin);
+  if (!norm) return false;
+  return state.instrumentByIsin.has(norm);
 }
 
-// ---------- Overdue logic ----------
-function nextDeemedDisposalDate(earliestTxDate) {
-  const start = parseDateISO(earliestTxDate);
-  if (!start) return null;
-  return addYears(start, 8);
+// ---------- Python-mirroring helpers ----------
+function getCreatedAtISO(pos) {
+  // Python uses p.get("createdAt") and parses as ISO datetime.
+  // If missing, Python falls back to now.
+  const raw = pos?.createdAt || pos?.created_at || null;
+  if (raw && typeof raw === "string") return raw;
+  return new Date().toISOString();
+}
+
+function createdAtUTCDate(pos) {
+  const raw = getCreatedAtISO(pos);
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  }
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function getTotalCost(pos) {
+  return (
+    pos?.walletImpact?.totalCost ??
+    pos?.total_cost ??
+    0
+  );
+}
+
+function getCurrentValue(pos) {
+  return (
+    pos?.walletImpact?.currentValue ??
+    pos?.current_value ??
+    0
+  );
+}
+
+function getUnrealisedPL(pos) {
+  // Python prefers walletImpact.unrealizedProfitLoss, otherwise current_value - total_cost.
+  const w = pos?.walletImpact?.unrealizedProfitLoss;
+  if (typeof w === "number" && !Number.isNaN(w)) return w;
+  return getCurrentValue(pos) - getTotalCost(pos);
+}
+
+function getCurrency(pos) {
+  // Mirror Python snapshot.py preference: instrument.currency OR walletImpact.currency
+  // In practice, walletImpact currency is usually present; fall back to instrument then legacy.
+  return (
+    pos?.walletImpact?.currency ??
+    pos?.instrument?.currency ??
+    pos?.currency ??
+    null
+  );
+}
+
+// ---------- Deemed disposal logic + core math ----------
+// Phase 1: We use Trading212 `createdAt` as the start date.
+// Note: once we integrate transactions, we can switch start-date to earliest transaction date.
+
+function deemedDisposalInfo(pos) {
+  const start = createdAtUTCDate(pos);
+  const asOf = parseDateISO(state.asOf);
+
+  if (!asOf) {
+    return {
+      start,
+      asOf: null,
+      cyclesCompleted: 0,
+      lastDd: null,
+      nextDd: addYearsSafeUTC(start, 8),
+      paymentDeadline: null,
+      inPaymentWindow: false,
+    };
+  }
+
+  // Exact cycle detection (8-year anniversaries) to avoid false positives.
+  let cyclesCompleted = 0;
+  while (true) {
+    const candidate = addYearsSafeUTC(start, (cyclesCompleted + 1) * 8);
+    if (asOf.getTime() >= candidate.getTime()) cyclesCompleted += 1;
+    else break;
+  }
+
+  const lastDd = cyclesCompleted >= 1 ? addYearsSafeUTC(start, cyclesCompleted * 8) : null;
+  const nextDd = addYearsSafeUTC(start, (cyclesCompleted + 1) * 8);
+
+  // Per your UX rule: if DD happened earlier this year, payment may not be due until end of Oct.
+  // Using Oct 31 of the deemed-disposal YEAR as the “still OK” window.
+  const paymentDeadline = lastDd
+    ? new Date(Date.UTC(lastDd.getUTCFullYear(), 9, 31)) // Oct=9 (0-indexed)
+    : null;
+
+  const inPaymentWindow = !!(lastDd && asOf.getTime() <= paymentDeadline.getTime());
+
+  return { start, asOf, cyclesCompleted, lastDd, nextDd, paymentDeadline, inPaymentWindow };
+}
+
+function nextDeemedDisposalDate(pos) {
+  return deemedDisposalInfo(pos).nextDd;
+}
+
+function hasDeemedDisposalValue(pos) {
+  const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
+  return ans && Number.isFinite(ans.deemedDisposalValue) && ans.deemedDisposalValue >= 0;
 }
 
 function isOverdue(pos) {
-  // Overdue means: as of date is AFTER the next deemed disposal date,
-  // AND we do not have the required "last exit tax date" + "value at that date".
-  const asOf = parseDateISO(state.asOf);
-  const next = nextDeemedDisposalDate(pos.earliest_tx_date);
-  if (!asOf || !next) return false;
+  const info = deemedDisposalInfo(pos);
+  if (info.cyclesCompleted < 1) return false;
 
-  const passed = asOf.getTime() > next.getTime();
-
-  if (!passed) return false;
+  // If still within payment window, not overdue.
+  if (info.inPaymentWindow) return false;
 
   const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
-  const ok = ans && parseDateISO(ans.lastExitTaxDate) && Number.isFinite(ans.valueAtThatDate);
-  return !ok;
+  const paid = !!ans?.paidExitTax;
+
+  // Outside payment window and not paid -> overdue.
+  return !paid;
 }
 
-function computeGain(pos) {
-  const cost = (pos.total_cost ?? 0);
-  const value = (pos.current_value ?? 0);
-  return value - cost;
+function needsQuestions(pos) {
+  const info = deemedDisposalInfo(pos);
+  if (info.cyclesCompleted < 1) return false;
+
+  // Once we’ve passed a DD, we need the market value on that DD date to rebase correctly.
+  if (!hasDeemedDisposalValue(pos)) return true;
+
+  // If overdue, show the guidance/checkbox screen as well.
+  if (isOverdue(pos)) return true;
+
+  return false;
+}
+
+function taxableGainToday(pos) {
+  // If we have deemed disposal value (rebased cost), use it.
+  if (hasDeemedDisposalValue(pos)) {
+    const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
+    return Math.max(getCurrentValue(pos) - ans.deemedDisposalValue, 0);
+  }
+
+  // Otherwise (pre-first-DD), mirror Python CLI Phase 1:
+  return Math.max(getCurrentValue(pos) - getTotalCost(pos), 0);
 }
 
 function computeTax(pos) {
-  // In Phase 1, if overdue we do not compute.
-  // If gain <= 0 => tax 0.
-  const gain = computeGain(pos);
-  if (gain <= 0) return 0;
-  return gain * EXIT_TAX_RATE;
+  const info = deemedDisposalInfo(pos);
+
+  // If past DD but missing DD value, can’t estimate reliably.
+  if (info.cyclesCompleted >= 1 && !hasDeemedDisposalValue(pos)) return null;
+
+  // If overdue, don’t estimate.
+  if (isOverdue(pos)) return null;
+
+  return taxableGainToday(pos) * EXIT_TAX_RATE;
+}
+
+function computeGain(pos) {
+  return getUnrealisedPL(pos);
 }
 
 // ---------- Loading JSON ----------
@@ -153,13 +320,23 @@ function clearConnectBanner() {
 }
 
 // ---------- Rendering: Overdue Questions ----------
-function renderOverdueQuestions(overduePositions) {
+function renderOverdueQuestions(positionsNeedingInfo) {
   const container = $("overdueList");
   container.innerHTML = "";
+  ensureSegStyles();
 
-  for (const pos of overduePositions) {
+  for (const pos of positionsNeedingInfo) {
     const isin = normalizeIsin(pos.isin);
+    const info = deemedDisposalInfo(pos);
     const existing = state.answersByIsin.get(isin);
+
+    const lastDdStr = info.lastDd ? fmtDate(info.lastDd) : "—";
+    const deadlineStr = info.paymentDeadline ? fmtDate(info.paymentDeadline) : "—";
+    const overdueNow = isOverdue(pos);
+
+    const guidance = overdueNow
+      ? `This holding appears to be past its deemed disposal date and outside the payment window (deadline ${deadlineStr}). If you have not paid exit tax for the deemed disposal on ${lastDdStr}, you may be overdue — consider seeking professional tax advice.`
+      : `This holding has passed a deemed disposal date (${lastDdStr}). To calculate correctly, we need the market value of your holding on that deemed disposal date.`;
 
     const card = document.createElement("div");
     card.className = "card";
@@ -170,18 +347,37 @@ function renderOverdueQuestions(overduePositions) {
 
       <div class="form">
         <div class="field">
-          <label>Date you last paid exit tax for this fund</label>
-          <input type="date" id="d_${isin}" />
-          <div class="small">If unsure, use the closest known date when you last returned exit tax for this fund.</div>
+          <label>Deemed disposal date we detected</label>
+          <input type="text" value="${escapeHtml(lastDdStr)}" disabled />
+          <div class="small">This is the most recent 8-year deemed disposal date based on the start date we’re using.</div>
         </div>
 
         <div class="field">
-          <label>Value of this investment on that date</label>
-          <input inputmode="decimal" placeholder="e.g. 12500" id="v_${isin}" />
-          <div class="small">This value is used as your new starting point for the next deemed disposal cycle.</div>
+          <label>Have you already paid exit tax for this deemed disposal?</label>
+
+          <div class="seg" role="group" aria-label="Exit tax paid">
+            <label class="seg-item" for="paid_yes_${isin}">
+              <input type="radio" id="paid_yes_${isin}" name="paid_${isin}" value="yes" />
+              <span>Yes</span>
+            </label>
+            <label class="seg-item" for="paid_no_${isin}">
+              <input type="radio" id="paid_no_${isin}" name="paid_${isin}" value="no" checked />
+              <span>No</span>
+            </label>
+          </div>
+
+          <div class="small">If you have not paid and the deadline has passed (${escapeHtml(deadlineStr)}), this may be overdue.</div>
         </div>
 
-        <div class="row row-right">
+        <div class="field">
+          <label>Value of this investment on ${escapeHtml(lastDdStr)}</label>
+          <input inputmode="decimal" placeholder="e.g. 12500" id="v_${isin}" />
+          <div class="small">We use this as the new cost base after the deemed disposal date.</div>
+        </div>
+
+        <div class="small" style="margin-top: 8px;">${escapeHtml(guidance)}</div>
+
+        <div class="row row-right" style="margin-top: 14px;">
           <button class="btn btn-accent" id="s_${isin}">Save</button>
         </div>
 
@@ -191,30 +387,35 @@ function renderOverdueQuestions(overduePositions) {
 
     container.appendChild(card);
 
-    // populate values if already saved
-    const dateEl = document.getElementById(`d_${isin}`);
+    const paidYesEl = document.getElementById(`paid_yes_${isin}`);
+    const paidNoEl = document.getElementById(`paid_no_${isin}`);
     const valEl = document.getElementById(`v_${isin}`);
     const msgEl = document.getElementById(`m_${isin}`);
     const saveEl = document.getElementById(`s_${isin}`);
 
     if (existing) {
-      if (existing.lastExitTaxDate) dateEl.value = existing.lastExitTaxDate;
-      if (Number.isFinite(existing.valueAtThatDate)) valEl.value = String(existing.valueAtThatDate);
+      const paid = !!existing.paidExitTax;
+      paidYesEl.checked = paid;
+      paidNoEl.checked = !paid;
+      if (Number.isFinite(existing.deemedDisposalValue)) valEl.value = String(existing.deemedDisposalValue);
+    } else {
+      // default to "No" (user hasn't paid) unless they explicitly say otherwise
+      paidYesEl.checked = false;
+      paidNoEl.checked = true;
     }
 
     saveEl.addEventListener("click", () => {
-      const lastExitTaxDate = (dateEl.value || "").trim();
-      const valueAtThatDate = Number((valEl.value || "").trim());
+      const paidExitTax = !!paidYesEl.checked;
+      const deemedDisposalValue = Number((valEl.value || "").trim());
 
-      const okDate = !!parseDateISO(lastExitTaxDate);
-      const okVal = Number.isFinite(valueAtThatDate) && valueAtThatDate >= 0;
+      const okVal = Number.isFinite(deemedDisposalValue) && deemedDisposalValue >= 0;
 
-      if (!okDate || !okVal) {
-        msgEl.textContent = "Please enter a valid date and a non-negative value.";
+      if (!okVal) {
+        msgEl.textContent = "Please enter a non-negative value for the holding on the deemed disposal date.";
         return;
       }
 
-      state.answersByIsin.set(isin, { lastExitTaxDate, valueAtThatDate });
+      state.answersByIsin.set(isin, { paidExitTax, deemedDisposalValue });
       msgEl.textContent = "Saved.";
 
       persistAnswersIfNeeded();
@@ -225,37 +426,64 @@ function renderOverdueQuestions(overduePositions) {
 // ---------- Rendering: Dashboard ----------
 function renderDashboard() {
   const relevant = state.positions.filter(p => isExitTaxInstrument(p.isin));
+  const unknown = state.positions.filter(p => !isExitTaxInstrument(p.isin));
 
-  // summary
-  const totalValue = relevant.reduce((s, p) => s + (p.current_value ?? 0), 0);
-  const totalGain = relevant.reduce((s, p) => s + computeGain(p), 0);
+  const currencies = new Set(relevant.map(p => getCurrency(p)).filter(Boolean));
+  const singleCcy = currencies.size === 1 ? [...currencies][0] : null;
+
+  const totalValue = relevant.reduce((s, p) => s + getCurrentValue(p), 0);
+  const totalPL = relevant.reduce((s, p) => s + getUnrealisedPL(p), 0);
 
   let overdueCount = 0;
   let totalTax = 0;
+  let needsInfoCount = 0;
 
   for (const p of relevant) {
     if (isOverdue(p)) {
       overdueCount += 1;
-    } else {
-      totalTax += computeTax(p);
+      continue;
     }
+
+    const t = computeTax(p);
+    if (t == null) {
+      needsInfoCount += 1;
+      continue;
+    }
+    totalTax += t;
   }
 
   $("summary").textContent =
     `${relevant.length} exit-tax holdings • ` +
-    `Value ${money(totalValue)} • ` +
-    `Net P/L ${money(totalGain)} • ` +
-    `Est. exit tax today ${money(totalTax)} • ` +
-    `${overdueCount} overdue`;
+    `Value ${money(totalValue, singleCcy)} • ` +
+    `Net P/L ${money(totalPL, singleCcy)} • ` +
+    `Est. exit tax today ${money(totalTax, singleCcy)} • ` +
+    `${overdueCount} overdue` +
+    (needsInfoCount ? ` • ${needsInfoCount} needs info` : "") +
+    (singleCcy ? "" : " • Mixed currency") +
+    (unknown.length ? ` • ${unknown.length} not in DB` : "");
 
-  // overdue banner
+  // banner
   const banner = $("overdueBanner");
   if (overdueCount > 0) {
     banner.textContent =
-      "Overdue deemed disposal detected. This tool cannot estimate exit tax for overdue holdings until you provide the value at your last exit-tax date. Consider seeking professional tax advice.";
+      "Overdue deemed disposal detected for one or more holdings. This tool will not estimate tax for overdue holdings. Consider seeking professional tax advice.";
+    show(banner);
+  } else if (needsInfoCount > 0) {
+    banner.textContent =
+      "More information is required to estimate tax for some holdings that have passed a deemed disposal date (we need the holding value on the deemed disposal date).";
     show(banner);
   } else {
     hide(banner);
+  }
+
+  if (unknown.length > 0) {
+    // Dev aid: list unknown ISINs so we can add them to the DB.
+    console.warn("Positions not found in instrument DB:", unknown.map(p => ({
+      isin: p.isin,
+      ticker: p.ticker,
+      name: p.name,
+      currency: getCurrency(p),
+    })));
   }
 
   renderHoldingsTable(relevant);
@@ -278,7 +506,7 @@ function renderHoldingsTable(rows) {
     const oa = isOverdue(a) ? 0 : 1;
     const ob = isOverdue(b) ? 0 : 1;
     if (oa !== ob) return oa - ob;
-    return (b.current_value ?? 0) - (a.current_value ?? 0);
+    return getCurrentValue(b) - getCurrentValue(a);
   });
 
   for (const pos of sorted) {
@@ -298,7 +526,7 @@ function renderHoldingsTable(rows) {
     const gainClass = gainIsLoss ? "neg" : "pos";
     const gainLabel = gainIsLoss ? "Loss" : "Gain";
 
-    const next = nextDeemedDisposalDate(pos.earliest_tx_date);
+    const next = nextDeemedDisposalDate(pos);
     const overdue = isOverdue(pos);
 
     let taxCell = "";
@@ -306,7 +534,8 @@ function renderHoldingsTable(rows) {
       taxCell = `<span class="neg">Overdue</span>`;
     } else {
       const tax = computeTax(pos);
-      taxCell = `${money(tax)}`;
+      if (tax == null) taxCell = `<span class="muted">Needs info</span>`;
+      else taxCell = `${money(tax, getCurrency(pos))}`;
     }
 
     tr.innerHTML = `
@@ -317,8 +546,8 @@ function renderHoldingsTable(rows) {
         </div>
       </td>
       <td>${escapeHtml(isin)}</td>
-      <td class="num">${money(pos.current_value ?? 0)}</td>
-      <td class="num ${gainClass}">${gainLabel} ${money(Math.abs(gain))}</td>
+      <td class="num">${money(getCurrentValue(pos), getCurrency(pos))}</td>
+      <td class="num ${gainClass}">${gainLabel} ${money(Math.abs(gain), getCurrency(pos))}</td>
       <td>${next ? fmtDate(next) : "—"}</td>
       <td class="num">${taxCell}</td>
     `;
@@ -343,11 +572,12 @@ function renderRightPanel(rows) {
   const gain = computeGain(selected);
   const gainIsLoss = gain < 0;
   const overdue = isOverdue(selected);
-  const next = nextDeemedDisposalDate(selected.earliest_tx_date);
+  const next = nextDeemedDisposalDate(selected);
 
   subtitle.textContent = `${selected.ticker || "Holding"} • ${isin}`;
 
-  const tax = overdue ? null : computeTax(selected);
+  const tax = computeTax(selected);
+  const needsInfo = (tax == null) && !overdue;
 
   drawerBody.innerHTML = `
     <div class="section-title">Assumptions</div>
@@ -362,7 +592,7 @@ function renderRightPanel(rows) {
       </div>
       <div class="card">
         <div class="label">Start date rule</div>
-        <div class="value">Earliest transaction date</div>
+        <div class="value">createdAt from Trading 212</div>
       </div>
       <div class="card">
         <div class="label">Cycle rule</div>
@@ -374,15 +604,15 @@ function renderRightPanel(rows) {
     <div class="kv">
       <div class="card">
         <div class="label">Value</div>
-        <div class="value">${money(selected.current_value ?? 0)}</div>
+        <div class="value">${money(getCurrentValue(selected), getCurrency(selected))}</div>
       </div>
       <div class="card">
         <div class="label">${gainIsLoss ? "Loss" : "Gain"}</div>
-        <div class="value">${money(Math.abs(gain))}</div>
+        <div class="value">${money(Math.abs(gain), getCurrency(selected))}</div>
       </div>
       <div class="card">
         <div class="label">Start date used</div>
-        <div class="value">${escapeHtml(selected.earliest_tx_date || "—")}</div>
+        <div class="value">${escapeHtml(getCreatedAtISO(selected))}</div>
       </div>
       <div class="card">
         <div class="label">Next deemed disposal date</div>
@@ -390,8 +620,15 @@ function renderRightPanel(rows) {
       </div>
       <div class="card">
         <div class="label">Exit tax (if today)</div>
-        <div class="value">${overdue ? `<span class="neg">Overdue</span>` : money(tax)}</div>
-        <div class="small">${overdue ? "Answer the overdue questions to calculate this holding." : (gain <= 0 ? "No exit tax is estimated where gain is zero or negative." : "")}</div>
+        <div class="value">${overdue ? `<span class="neg">Overdue</span>` : (needsInfo ? `<span class="muted">Needs info</span>` : money(tax, getCurrency(selected)))}</div>
+        <div class="small">${
+          overdue
+            ? "If the payment deadline has passed and you have not paid exit tax, consider seeking professional advice."
+            : (needsInfo
+              ? "We need the holding value on the deemed disposal date to estimate tax since that date."
+              : (taxableGainToday(selected) <= 0 ? "No exit tax is estimated where taxable gain is zero." : "")
+            )
+        }</div>
       </div>
       <div class="card">
         <div class="label">Notes</div>
@@ -407,10 +644,13 @@ function renderChart(rows) {
   if (!ctx || typeof Chart === "undefined") return;
 
   const labels = rows.map(p => (p.ticker || normalizeIsin(p.isin)).slice(0, 10));
-  const values = rows.map(p => (p.current_value ?? 0));
+  const values = rows.map(p => getCurrentValue(p));
 
-  // Tax series: overdue => 0 (but tooltips will clarify via label)
-  const taxes = rows.map(p => (isOverdue(p) ? 0 : computeTax(p)));
+  // Tax series: overdue/needs-info => 0 (tooltips clarify)
+  const taxes = rows.map(p => {
+    const t = computeTax(p);
+    return (t == null) ? 0 : t;
+  });
 
   if (state.chart) {
     state.chart.destroy();
@@ -435,8 +675,9 @@ function renderChart(rows) {
             afterLabel: (tt) => {
               const idx = tt.dataIndex;
               const p = rows[idx];
-              if (tt.datasetIndex === 1 && isOverdue(p)) return "Overdue (needs answers)";
-              if (tt.datasetIndex === 1 && computeGain(p) <= 0) return "No tax (no gain)";
+              if (tt.datasetIndex === 1 && isOverdue(p)) return "Overdue";
+              if (tt.datasetIndex === 1 && computeTax(p) == null && !isOverdue(p)) return "Needs info";
+              if (tt.datasetIndex === 1 && taxableGainToday(p) <= 0) return "No tax (no gain)";
               return "";
             }
           }
@@ -515,19 +756,34 @@ async function init() {
     if (state.rememberDevice) persistCredsIfNeeded(key, secret);
 
     try {
-      // Load DB + demo holdings
-      const [instrumentDb, mock] = await Promise.all([
-        loadJson("./data/exit_tax_instruments_by_isin.json"),
-        safeLoadMockPositions(),
-      ]);
-
+      // Load DB + holdings
+      const instrumentDb = await loadJson("./data/exit_tax_instruments_by_isin.json");
       hydrateInstrumentDb(instrumentDb);
 
-      state.asOf = mock.as_of || new Date().toISOString().slice(0, 10);
-      state.positions = (mock.positions || []).map(p => ({
-        ...p,
-        isin: normalizeIsin(p.isin),
-      }));
+      let positions;
+      try {
+        positions = await loadPositionsFromDocs();
+        const b = $("connectBanner");
+        b.textContent = "Loaded holdings from docs/data/positions.json";
+        b.classList.remove("hidden");
+      } catch (err) {
+        const demo = await safeLoadMockPositions();
+        positions = demo.positions || demo.items || demo;
+        const b = $("connectBanner");
+        b.textContent = "Using demo holdings (could not load docs/data/positions.json).";
+        b.classList.remove("hidden");
+      }
+
+      state.positions = (positions || []).map((p) => {
+        const isin = normalizeIsin(p?.isin || p?.instrument?.isin);
+        return {
+          ...p,
+          isin,
+          ticker: p?.ticker || p?.instrument?.ticker,
+          name: p?.name || p?.instrument?.name,
+        };
+      });
+      state.asOf = new Date().toISOString().slice(0, 10);
 
       // Filter to exit-tax relevant instruments
       const relevant = state.positions.filter(p => isExitTaxInstrument(p.isin));
@@ -537,15 +793,11 @@ async function init() {
         return;
       }
 
-      // Determine overdue holdings
-      const overdue = relevant.filter(p => {
-        const asOf = parseDateISO(state.asOf);
-        const next = nextDeemedDisposalDate(p.earliest_tx_date);
-        return asOf && next && asOf.getTime() > next.getTime();
-      });
+      // Determine holdings needing info (UX gating)
+      const needs = relevant.filter(needsQuestions);
 
-      if (overdue.length > 0) {
-        renderOverdueQuestions(overdue);
+      if (needs.length > 0) {
+        renderOverdueQuestions(needs);
         viewOverdue();
       } else {
         viewDashboard();
@@ -565,6 +817,30 @@ async function init() {
   viewConnect();
 }
 
+async function loadPositionsFromDocs() {
+  // Prefer a real snapshot JSON placed at: docs/data/positions.json
+  // This keeps the UI static-file friendly (works on GitHub Pages) while we postpone live API wiring.
+  const url = new URL("./data/positions.json", import.meta.url);
+  const res = await fetch(url, { cache: "no-store" });
+
+  if (!res.ok) {
+    throw new Error(
+      `positions.json not found (HTTP ${res.status}). Put a Trading212 positions export at docs/data/positions.json`
+    );
+  }
+
+  const data = await res.json();
+
+  // Accept either a plain list of positions, {items:[...]}, or {positions:[...]}
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.items)) return data.items;
+  if (data && Array.isArray(data.positions)) return data.positions;
+
+  throw new Error(
+    "Unsupported positions.json format. Expected an array, {items:[...]}, or {positions:[...]}"
+  );
+}
+
 // Fallback: if docs/data/mock_positions.json doesn't exist yet, use embedded demo.
 async function safeLoadMockPositions() {
   try {
@@ -574,6 +850,10 @@ async function safeLoadMockPositions() {
       as_of: new Date().toISOString().slice(0, 10),
       positions: [
         {
+          instrument: { isin: "IE00BK5BQT80", ticker: "VWCE", name: "Vanguard FTSE All-World UCITS ETF (Acc)" },
+          createdAt: "2019-02-10T00:00:00Z",
+          walletImpact: { totalCost: 10000, currentValue: 13750, unrealizedProfitLoss: 3750, currency: "EUR" },
+          // Keep legacy fields for compatibility:
           name: "Vanguard FTSE All-World UCITS ETF (Acc)",
           ticker: "VWCE",
           isin: "IE00BK5BQT80",
@@ -582,6 +862,9 @@ async function safeLoadMockPositions() {
           earliest_tx_date: "2019-02-10"
         },
         {
+          instrument: { isin: "IE00B4L5Y983", ticker: "IWDA", name: "iShares Core MSCI World UCITS ETF (Acc)" },
+          createdAt: "2016-05-20T00:00:00Z",
+          walletImpact: { totalCost: 9000, currentValue: 8200, unrealizedProfitLoss: -800, currency: "EUR" },
           name: "iShares Core MSCI World UCITS ETF (Acc)",
           ticker: "IWDA",
           isin: "IE00B4L5Y983",

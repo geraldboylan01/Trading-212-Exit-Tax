@@ -1,0 +1,23 @@
+[
+  {
+    "instrument": {
+      "ticker": "VWCEd_EQ",
+      "name": "Vanguard FTSE All-World (Acc)",
+      "isin": "IE00BK5BQT80",
+      "currency": "EUR"
+    },
+    "createdAt": "2026-01-22T10:05:14.015+02:00",
+    "quantity": 33.7700932,
+    "quantityAvailableForTrading": 33.0894755626,
+    "quantityInPies": 0,
+    "currentPrice": 147.72,
+    "averagePricePaid": 148.06000002,
+    "walletImpact": {
+      "currency": "EUR",
+      "totalCost": 5000.0,
+      "currentValue": 4988.52,
+      "unrealizedProfitLoss": -11.48,
+      "fxImpact": null
+    }
+  }
+]
