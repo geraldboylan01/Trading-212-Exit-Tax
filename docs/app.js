@@ -114,9 +114,17 @@ function parseDateISO(s) {
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+// Display dates as DDMMYYYY (UTC) everywhere in the UI.
 function fmtDate(d) {
-  if (!(d instanceof Date)) return "—";
-  return d.toISOString().slice(0, 10);
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return "—";
+  const dd = pad2(d.getUTCDate());
+  const mm = pad2(d.getUTCMonth() + 1);
+  const yyyy = String(d.getUTCFullYear());
+  return `${dd}${mm}${yyyy}`;
 }
 
 function isLeapYear(y) {
@@ -671,10 +679,8 @@ function renderHoldingsTable(rows) {
 
     tr.innerHTML = `
       <td>
-        <div style="font-weight:900">${escapeHtml(pos.ticker || "—")}</div>
-        <div style="color: var(--muted); font-size: 12px; margin-top: 2px; max-width: 420px; overflow: hidden; text-overflow: ellipsis;">
-          ${escapeHtml(pos.name || "")}
-        </div>
+        <div style="font-weight:900; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(pos.name || pos.ticker || "—")}</div>
+        <div style="color: var(--muted); font-size: 12px; margin-top: 2px;">${escapeHtml(pos.ticker || "—")}</div>
       </td>
       <td>${escapeHtml(isin)}</td>
       <td class="num">${money(getCurrentValue(pos), getCurrency(pos))}</td>
@@ -694,8 +700,8 @@ function renderRightPanel(rows) {
   const selected = rows.find(p => normalizeIsin(p.isin) === state.selectedIsin);
 
   if (!selected) {
-    subtitle.textContent = "Select a holding to view details";
-    drawerBody.innerHTML = `<div class="empty">Select a holding to see how dates and tax are calculated.</div>`;
+    subtitle.textContent = "Select a security to view details";
+    drawerBody.innerHTML = `<div class="empty">Select a security to see how dates and tax are calculated.</div>`;
     return;
   }
 
@@ -719,7 +725,7 @@ function renderRightPanel(rows) {
       </div>
       <div class="card">
         <div class="label">As of date</div>
-        <div class="value">${escapeHtml(state.asOf || "—")}</div>
+        <div class="value">${escapeHtml(fmtDate(parseDateISO(state.asOf)))}</div>
       </div>
       <div class="card">
         <div class="label">Start date rule</div>
@@ -743,7 +749,7 @@ function renderRightPanel(rows) {
       </div>
       <div class="card">
         <div class="label">Start date used</div>
-        <div class="value">${escapeHtml(getCreatedAtISO(selected))}</div>
+        <div class="value">${escapeHtml(fmtDate(createdAtUTCDate(selected)))}</div>
       </div>
       <div class="card">
         <div class="label">Next deemed disposal date</div>
