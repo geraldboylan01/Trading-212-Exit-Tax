@@ -896,6 +896,8 @@ async function init() {
 
     const key = ($("apiKey").value || "").trim();
     const secret = ($("apiSecret").value || "").trim();
+    const checkedEnv = document.querySelector('input[name="apiEnv"]:checked')?.value;
+    if (checkedEnv) setEnv(checkedEnv);
     const env = getEnv();
 
     // Persist creds + selected env only if the user opted in.
