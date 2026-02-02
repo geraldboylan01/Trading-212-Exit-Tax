@@ -84,6 +84,8 @@ const state = {
   asOf: null,
   positions: [],
   instrumentByIsin: new Map(),
+  // User overrides: ISINs the user explicitly marks as subject to deemed disposal.
+  includedIsins: new Set(),
   // Answers keyed by ISIN for deemed-disposal handling.
   // { paidExitTax: boolean, deemedDisposalValue: number }
   answersByIsin: new Map(),
@@ -95,6 +97,34 @@ const state = {
 };
 
 function $(id) { return document.getElementById(id); }
+
+const EXIT_TAX_OVERRIDES_KEY = "exitTaxIncludedIsins";
+
+function loadExitTaxOverrides() {
+  try {
+    const raw = localStorage.getItem(EXIT_TAX_OVERRIDES_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    state.includedIsins = new Set((arr || []).map(normalizeIsin).filter(Boolean));
+  } catch {
+    state.includedIsins = new Set();
+  }
+}
+
+function persistExitTaxOverrides() {
+  try {
+    localStorage.setItem(EXIT_TAX_OVERRIDES_KEY, JSON.stringify([...state.includedIsins]));
+  } catch {}
+}
+
+function includeIsinForExitTax(isin) {
+  const norm = normalizeIsin(isin);
+  if (!norm) return;
+  state.includedIsins.add(norm);
+  persistExitTaxOverrides();
+  // Ensure something is selected after promoting.
+  state.selectedIsin = norm;
+  renderDashboard();
+}
 
 function normalizeIsin(isin) {
   if (isin == null) return "";
@@ -284,10 +314,11 @@ function hydrateInstrumentDb(dbJson) {
 }
 
 function isExitTaxInstrument(isin) {
-  // Per project rule: if ISIN exists in our DB, treat as exit-tax instrument.
+  // Project rule: if ISIN exists in our DB, treat as exit-tax instrument.
+  // Plus: user overrides (includedIsins) are treated as subject to deemed disposal.
   const norm = normalizeIsin(isin);
   if (!norm) return false;
-  return state.instrumentByIsin.has(norm);
+  return state.instrumentByIsin.has(norm) || state.includedIsins.has(norm);
 }
 
 // ---------- Python-mirroring helpers ----------
@@ -574,7 +605,7 @@ function renderOverdueQuestions(positionsNeedingInfo) {
 // ---------- Rendering: Dashboard ----------
 function renderDashboard() {
   const relevant = state.positions.filter(p => isExitTaxInstrument(p.isin));
-  const unknown = state.positions.filter(p => !isExitTaxInstrument(p.isin));
+  const other = state.positions.filter(p => !isExitTaxInstrument(p.isin));
 
   const currencies = new Set(relevant.map(p => getCurrency(p)).filter(Boolean));
   const singleCcy = currencies.size === 1 ? [...currencies][0] : null;
@@ -608,7 +639,7 @@ function renderDashboard() {
     `${overdueCount} overdue` +
     (needsInfoCount ? ` • ${needsInfoCount} needs info` : "") +
     (singleCcy ? "" : " • Mixed currency") +
-    (unknown.length ? ` • ${unknown.length} not in DB` : "");
+    (other.length ? ` • ${other.length} other securities` : "");
 
   // banner
   const banner = $("overdueBanner");
@@ -624,9 +655,9 @@ function renderDashboard() {
     hide(banner);
   }
 
-  if (unknown.length > 0) {
-    // Dev aid: list unknown ISINs so we can add them to the DB.
-    console.warn("Positions not found in instrument DB:", unknown.map(p => ({
+  if (other.length > 0) {
+    // Dev aid: list non-exit-tax securities so we can add to DB or include via override.
+    console.warn("Securities not currently treated as exit-tax:", other.map(p => ({
       isin: p.isin,
       ticker: p.ticker,
       name: p.name,
@@ -635,14 +666,14 @@ function renderDashboard() {
   }
 
   renderHoldingsTable(relevant);
-  renderChart(relevant);
+  renderOtherSecuritiesTable(other);
 
   // default selection
   if (!state.selectedIsin && relevant.length > 0) {
     state.selectedIsin = normalizeIsin(relevant[0].isin);
   }
 
-  renderRightPanel(relevant);
+  renderRightPanel(relevant, other);
 }
 
 function renderHoldingsTable(rows) {
@@ -702,11 +733,12 @@ function renderHoldingsTable(rows) {
   }
 }
 
-function renderRightPanel(rows) {
+function renderRightPanel(relevantRows, otherRows) {
   const drawerBody = $("drawerBody");
   const subtitle = $("assumptionsSubtitle");
 
-  const selected = rows.find(p => normalizeIsin(p.isin) === state.selectedIsin);
+  const allRows = [...(relevantRows || []), ...(otherRows || [])];
+  const selected = allRows.find(p => normalizeIsin(p.isin) === state.selectedIsin);
 
   if (!selected) {
     subtitle.textContent = "Select a security to view details";
@@ -715,15 +747,16 @@ function renderRightPanel(rows) {
   }
 
   const isin = normalizeIsin(selected.isin);
+  const isExitTax = isExitTaxInstrument(isin);
   const gain = computeGain(selected);
   const gainIsLoss = gain < 0;
-  const overdue = isOverdue(selected);
-  const next = nextDeemedDisposalDate(selected);
+  const overdue = isExitTax ? isOverdue(selected) : false;
+  const next = isExitTax ? nextDeemedDisposalDate(selected) : null;
 
   subtitle.textContent = `${selected.ticker || "Holding"} • ${isin}`;
 
-  const tax = computeTax(selected);
-  const needsInfo = (tax == null) && !overdue;
+  const tax = isExitTax ? computeTax(selected) : null;
+  const needsInfo = isExitTax ? ((tax == null) && !overdue) : false;
 
   drawerBody.innerHTML = `
     <div class="section-title">Assumptions</div>
@@ -762,81 +795,89 @@ function renderRightPanel(rows) {
       </div>
       <div class="card">
         <div class="label">Next deemed disposal date</div>
-        <div class="value">${next ? fmtDate(next) : "—"}</div>
+        <div class="value">${isExitTax ? (next ? fmtDate(next) : "—") : "N/A"}</div>
       </div>
       <div class="card">
         <div class="label">Exit tax (if today)</div>
-        <div class="value">${overdue ? `<span class="neg">Overdue</span>` : (needsInfo ? `<span class="muted">Needs info</span>` : money(tax, getCurrency(selected)))}</div>
+        <div class="value">${isExitTax ? (overdue ? `<span class="neg">Overdue</span>` : (needsInfo ? `<span class="muted">Needs info</span>` : money(tax, getCurrency(selected)))) : "N/A"}</div>
         <div class="small">${
-          overdue
-            ? "If the payment deadline has passed and you have not paid exit tax, consider seeking professional advice."
-            : (needsInfo
-              ? "We need the holding value on the deemed disposal date to estimate tax since that date."
-              : (taxableGainToday(selected) <= 0 ? "No exit tax is estimated where taxable gain is zero." : "")
+          !isExitTax
+            ? "This security is not currently treated as subject to deemed disposal. If it should be, click Include in the Other securities table."
+            : (overdue
+              ? "If the payment deadline has passed and you have not paid exit tax, consider seeking professional advice."
+              : (needsInfo
+                ? "We need the holding value on the deemed disposal date to estimate tax since that date."
+                : (taxableGainToday(selected) <= 0 ? "No exit tax is estimated where taxable gain is zero." : "")
+              )
             )
         }</div>
       </div>
       <div class="card">
         <div class="label">Notes</div>
-        <div class="value">${overdue ? "Action required" : "OK"}</div>
+        <div class="value">${!isExitTax ? "Not included" : (overdue ? "Action required" : "OK")}</div>
       </div>
     </div>
   `;
 }
+function renderOtherSecuritiesTable(rows) {
+  const tbody = $("otherTbody");
+  const empty = $("otherEmpty");
+  if (!tbody) return;
+
+  tbody.innerHTML = "";
+
+  if (!rows || rows.length === 0) {
+    if (empty) empty.classList.remove("hidden");
+    return;
+  }
+  if (empty) empty.classList.add("hidden");
+
+  // sort by value desc
+  const sorted = [...rows].sort((a, b) => getCurrentValue(b) - getCurrentValue(a));
+
+  for (const pos of sorted) {
+    const isin = normalizeIsin(pos.isin);
+    const tr = document.createElement("tr");
+
+    if (state.selectedIsin === isin) tr.classList.add("selected");
+
+    tr.addEventListener("click", () => {
+      state.selectedIsin = isin;
+      renderDashboard();
+    });
+
+    const gain = computeGain(pos);
+    const gainIsLoss = gain < 0;
+
+    const gainClass = gainIsLoss ? "neg" : "pos";
+    const gainLabel = gainIsLoss ? "Loss" : "Gain";
+
+    tr.innerHTML = `
+      <td>
+        <div style="font-weight:900; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(pos.name || pos.ticker || "—")}</div>
+        <div style="color: var(--muted); font-size: 12px; margin-top: 2px;">${escapeHtml(pos.ticker || "—")}</div>
+      </td>
+      <td>${escapeHtml(isin)}</td>
+      <td class="num">${money(getCurrentValue(pos), getCurrency(pos))}</td>
+      <td class="num ${gainClass}">${gainLabel} ${money(Math.abs(gain), getCurrency(pos))}</td>
+      <td>N/A</td>
+      <td class="num"><button class="btn btn-ghost" type="button" data-isin="${escapeHtml(isin)}">Include</button></td>
+    `;
+
+    const btn = tr.querySelector("button[data-isin]");
+    if (btn) {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        includeIsinForExitTax(isin);
+      });
+    }
+
+    tbody.appendChild(tr);
+  }
+}
 
 // ---------- Chart ----------
-function renderChart(rows) {
-  const ctx = $("barChart");
-  if (!ctx || typeof Chart === "undefined") return;
-
-  const labels = rows.map(p => (p.ticker || normalizeIsin(p.isin)).slice(0, 10));
-  const values = rows.map(p => getCurrentValue(p));
-
-  // Tax series: overdue/needs-info => 0 (tooltips clarify)
-  const taxes = rows.map(p => {
-    const t = computeTax(p);
-    return (t == null) ? 0 : t;
-  });
-
-  if (state.chart) {
-    state.chart.destroy();
-    state.chart = null;
-  }
-
-  state.chart = new Chart(ctx, {
-    type: "bar",
-    data: {
-      labels,
-      datasets: [
-        { label: "Value", data: values },
-        { label: "Exit tax (if today)", data: taxes },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        tooltip: {
-          callbacks: {
-            afterLabel: (tt) => {
-              const idx = tt.dataIndex;
-              const p = rows[idx];
-              if (tt.datasetIndex === 1 && isOverdue(p)) return "Overdue";
-              if (tt.datasetIndex === 1 && computeTax(p) == null && !isOverdue(p)) return "Needs info";
-              if (tt.datasetIndex === 1 && taxableGainToday(p) <= 0) return "No tax (no gain)";
-              return "";
-            }
-          }
-        },
-        legend: { labels: { color: "#e9f1ff" } }
-      },
-      scales: {
-        x: { ticks: { color: "#e9f1ff" }, grid: { color: "rgba(233,241,255,0.06)" } },
-        y: { ticks: { color: "#e9f1ff" }, grid: { color: "rgba(233,241,255,0.06)" } },
-      }
-    }
-  });
-}
+// Chart rendering removed.
 
 // ---------- Persistence (optional) ----------
 function persistAnswersIfNeeded() {
@@ -903,6 +944,7 @@ async function init() {
   loadPersistedCredsIfAny();
   initEnvControl();
   loadPersistedAnswersIfAny();
+  loadExitTaxOverrides();
 
   $("btnFetchHoldings").addEventListener("click", async () => {
     clearConnectBanner();
