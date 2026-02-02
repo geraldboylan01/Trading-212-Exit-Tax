@@ -4,7 +4,7 @@
 // - Handles CORS for your GitHub Pages origin.
 // - POST /positions  { apiKey, apiSecret, env?: "live"|"demo" }
 
-const RATE_LIMIT_WINDOW_MS = 1000; // best-effort, in-memory
+const RATE_LIMIT_WINDOW_MS = 5000; // best-effort, in-memory (T212 docs are 1 req / ~5s)
 const ipLastSeen = new Map(); // in-memory only
 
 function json(body, status = 200, corsHeaders = {}) {
@@ -33,7 +33,8 @@ function getCorsHeaders(request, env) {
       "Access-Control-Allow-Origin": origin || "*",
       "Vary": "Origin",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type", // browser sends JSON; keep tight
+      "Access-Control-Max-Age": "86400",
     };
   }
 
@@ -42,7 +43,8 @@ function getCorsHeaders(request, env) {
       "Access-Control-Allow-Origin": origin,
       "Vary": "Origin",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type", // browser sends JSON; keep tight
+      "Access-Control-Max-Age": "86400",
     };
   }
 
@@ -122,13 +124,32 @@ export default {
     });
 
     if (!tRes.ok) {
-      // Do NOT echo secrets. Return generic error.
-      const text = await tRes.text().catch(() => "");
-      return json(
-        { error: `Trading212 error (HTTP ${tRes.status})`, detail: text.slice(0, 300) },
-        502,
-        cors
-      );
+      // Do NOT echo secrets. Return a safe, user-actionable error.
+      const status = tRes.status;
+
+      // Common cases: auth/IP restrictions (401/403) and rate limit (429)
+      if (status === 401 || status === 403) {
+        return json(
+          {
+            error: `Trading212 unauthorized (HTTP ${status})`,
+            hint:
+              "Check API key/secret, correct env (live vs demo), account type (Invest/ISA), and whether the key has IP restrictions enabled (Cloudflare egress IPs won't match a personal allowlist).",
+          },
+          status,
+          cors
+        );
+      }
+
+      if (status === 429) {
+        return json(
+          { error: "Trading212 rate limited (HTTP 429)", hint: "Wait a few seconds and retry." },
+          429,
+          cors
+        );
+      }
+
+      // Fallback: gateway-style error, avoid leaking upstream body.
+      return json({ error: `Trading212 error (HTTP ${status})` }, 502, cors);
     }
 
     const positions = await tRes.json();

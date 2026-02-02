@@ -48,6 +48,15 @@
               <input id="apiSecret" type="password" placeholder="••••••••" autocomplete="off" />
             </div>
 
+            <div class="field">
+              <label for="apiEnv">Environment</label>
+              <select id="apiEnv">
+                <option value="live" selected>Live (real account)</option>
+                <option value="demo">Demo (practice account)</option>
+              </select>
+              <div class="small" style="margin-top: 6px;">If your keys are for a demo account, choose Demo. Live keys won’t work on Demo and vice‑versa.</div>
+            </div>
+
             <label class="checkbox" for="rememberDevice">
               <input id="rememberDevice" type="checkbox" />
               Remember this device
