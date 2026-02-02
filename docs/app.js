@@ -4,7 +4,82 @@
 //
 // Later (Phase 2), btnFetchHoldings will call the Trading212 API and build the same "positions" shape.
 
+
 const EXIT_TAX_RATE = 0.38;
+
+// Phase 2 (serverless proxy): set this to your deployed Worker URL.
+// Example: "https://t212-exit-tax-proxy.your-subdomain.workers.dev"
+// Users can override without code changes using:
+//   1) ?proxy=https://... (query param)
+//   2) localStorage key "t212ProxyBaseUrl"
+// Leave blank to skip proxy and use docs/data/positions.json (snapshot mode).
+// If a proxy URL is configured, we treat that as live mode and do NOT silently fall back to the snapshot when creds are provided.
+const T212_PROXY_BASE_URL = "https://t212-exit-tax-proxy.geraldboylan.workers.dev";
+
+function getProxyBaseUrl() {
+  // Allow overriding without code changes:
+  // 1) ?proxy=https://... query param
+  // 2) localStorage key "t212ProxyBaseUrl"
+  try {
+    const u = new URL(window.location.href);
+    const qp = u.searchParams.get("proxy");
+    if (qp && qp.startsWith("http")) return qp.replace(/\/+$/, "");
+  } catch {}
+  try {
+    const ls = localStorage.getItem("t212ProxyBaseUrl") || "";
+    if (ls && ls.startsWith("http")) {
+      // Safety: if someone previously set a localhost override during development,
+      // GitHub Pages will never be able to reach it. Ignore localhost on github.io.
+      const isGitHubPages = /(^|\.)github\.io$/i.test(window.location.hostname);
+      const isLocalhostOverride = /^(https?:\/\/)?localhost(:\d+)?/i.test(ls);
+      if (!(isGitHubPages && isLocalhostOverride)) {
+        return ls.replace(/\/+$/, "");
+      }
+    }
+  } catch {}
+  return (T212_PROXY_BASE_URL || "").replace(/\/+$/, "");
+}
+
+async function loadPositionsViaProxy(apiKey, apiSecret, envName = "live") {
+  const base = getProxyBaseUrl();
+  if (!base) throw new Error("Proxy URL not configured.");
+
+  const url = `${base}/positions`;
+
+  // NOTE: We deliberately use only the Content-Type header.
+  // This will trigger an OPTIONS preflight for application/json, which is expected.
+  // CORS must be allowed by the Worker for the page Origin.
+  const res = await fetch(url, {
+    method: "POST",
+    mode: "cors",
+    credentials: "omit",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey, apiSecret, env: envName }),
+  });
+
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  const isJson = ct.includes("application/json");
+  const payload = isJson ? await res.json().catch(() => null) : await res.text().catch(() => "");
+
+  if (!res.ok) {
+    // Do NOT echo secrets. Return a safe, compact error.
+    const detail =
+      (payload && typeof payload === "object" && (payload.error || payload.detail))
+        ? `${payload.error || ""}${payload.detail ? ` ${String(payload.detail)}` : ""}`.trim()
+        : (typeof payload === "string" ? payload : "");
+
+    // Common CORS failures surface as a TypeError before we get here.
+    throw new Error(`Proxy error (HTTP ${res.status})${detail ? ` - ${detail}` : ""}`);
+  }
+
+  // Accept array, {items:[...]}, or {positions:[...]}
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.items)) return payload.items;
+  if (payload && Array.isArray(payload.positions)) return payload.positions;
+
+  throw new Error("Proxy returned unexpected JSON shape.");
+}
 
 // Approx date diff is fine for UI gating; exact anniversary uses date math.
 const state = {
@@ -761,17 +836,51 @@ async function init() {
       hydrateInstrumentDb(instrumentDb);
 
       let positions;
-      try {
-        positions = await loadPositionsFromDocs();
-        const b = $("connectBanner");
-        b.textContent = "Loaded holdings from docs/data/positions.json";
-        b.classList.remove("hidden");
-      } catch (err) {
-        const demo = await safeLoadMockPositions();
-        positions = demo.positions || demo.items || demo;
-        const b = $("connectBanner");
-        b.textContent = "Using demo holdings (could not load docs/data/positions.json).";
-        b.classList.remove("hidden");
+
+      const proxyBase = getProxyBaseUrl();
+      const wantsLive = !!proxyBase;
+      const hasCreds = !!(key && secret);
+
+      // If a proxy is configured, we treat this as the primary (live) path.
+      // IMPORTANT: When creds are provided, do NOT silently fall back to a static snapshot,
+      // otherwise GitHub Pages will appear to “use old data”.
+      if (wantsLive) {
+        if (!hasCreds) {
+          showConnectBanner(
+            "Enter your Trading 212 API key + secret, then click ‘Fetch holdings’.\n" +
+            "(This app fetches holdings via your Cloudflare Worker proxy; we don’t use the static snapshot when live mode is enabled.)"
+          );
+          return;
+        }
+
+        try {
+          positions = await loadPositionsViaProxy(key, secret, "live");
+          showConnectBanner("Loaded holdings from Trading 212 (via proxy).");
+        } catch (proxyErr) {
+          const msg = String(proxyErr?.message || proxyErr || "");
+          console.warn("Proxy fetch failed:", proxyErr);
+
+          // Show a clear error and STOP. No snapshot fallback in live mode.
+          showConnectBanner(
+            "Could not load holdings from the Cloudflare Worker proxy.\n" +
+            `Origin: ${window.location.origin}\n` +
+            `Proxy: ${proxyBase}\n` +
+            (/(failed to fetch|cors)/i.test(msg)
+              ? "Likely cause: CORS / preflight blocked. Fix by adding this origin to the Worker allowlist and redeploying."
+              : `Error: ${msg}`)
+          );
+          return;
+        }
+      } else {
+        // No proxy configured: allow static snapshot/demo for offline GitHub Pages friendly mode.
+        try {
+          positions = await loadPositionsFromDocs();
+          showConnectBanner("Loaded holdings from docs/data/positions.json (snapshot mode).");
+        } catch (err) {
+          const demo = await safeLoadMockPositions();
+          positions = demo.positions || demo.items || demo;
+          showConnectBanner("Using demo holdings (no proxy configured and snapshot missing)." );
+        }
       }
 
       state.positions = (positions || []).map((p) => {
@@ -821,7 +930,9 @@ async function loadPositionsFromDocs() {
   // Prefer a real snapshot JSON placed at: docs/data/positions.json
   // This keeps the UI static-file friendly (works on GitHub Pages) while we postpone live API wiring.
   const url = new URL("./data/positions.json", import.meta.url);
-  const res = await fetch(url, { cache: "no-store" });
+  // Cache-bust to avoid GH Pages / browser caching stale snapshots
+  url.searchParams.set("t", String(Date.now()));
+  const res = await fetch(url.toString(), { cache: "no-store" });
 
   if (!res.ok) {
     throw new Error(
