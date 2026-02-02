@@ -102,6 +102,15 @@ function normalizeIsin(isin) {
   return String(isin).trim().toUpperCase().replace(/\s+/g, "");
 }
 
+function looksLikeTicker(s) {
+  if (s == null) return false;
+  const t = String(s).trim();
+  if (!t) return false;
+  if (t.length > 12) return false;
+  if (t.includes(" ")) return false;
+  return /^[A-Za-z0-9_.-]+$/.test(t);
+}
+
 function parseDateISO(s) {
   if (!s) return null;
   // Parse as UTC midnight to avoid timezone drift.
@@ -977,11 +986,20 @@ async function init() {
 
       state.positions = (positions || []).map((p) => {
         const isin = normalizeIsin(p?.isin || p?.instrument?.isin);
+        const dbInfo = state.instrumentByIsin.get(isin) || {};
+        let rawTicker = p?.ticker ?? p?.instrument?.ticker ?? dbInfo.ticker;
+        let rawName = p?.name ?? p?.instrument?.name ?? dbInfo.name;
+
+        // If upstream swaps name/ticker, fix it.
+        if (looksLikeTicker(rawName) && !looksLikeTicker(rawTicker)) {
+          [rawName, rawTicker] = [rawTicker, rawName];
+        }
+
         return {
           ...p,
           isin,
-          ticker: p?.ticker || p?.instrument?.ticker,
-          name: p?.name || p?.instrument?.name,
+          ticker: rawTicker,
+          name: rawName,
         };
       });
       state.asOf = new Date().toISOString().slice(0, 10);
