@@ -90,6 +90,8 @@ const state = {
   selectedIsin: null,
   rememberDevice: false,
   chart: null,
+  // Single source of truth for account environment (live/demo)
+  apiEnv: "live",
 };
 
 function $(id) { return document.getElementById(id); }
@@ -147,6 +149,7 @@ function money(n, currency) {
 }
 
 
+
 function ensureSegStyles() {
   if (document.getElementById("segStyles")) return;
   const style = document.createElement("style");
@@ -159,6 +162,61 @@ function ensureSegStyles() {
     .seg-item:has(input:checked) { border-color: rgba(60,196,255,0.65); box-shadow: 0 0 0 3px rgba(60,196,255,0.12); background: rgba(60,196,255,0.08); }
   `;
   document.head.appendChild(style);
+}
+
+// ---------- Environment (Live / Demo) ----------
+// Fool-proof approach: app.js (state.apiEnv) is the single source of truth.
+// UI can be radios OR split buttons; both are supported.
+function setEnv(env) {
+  state.apiEnv = (String(env).toLowerCase() === "demo") ? "demo" : "live";
+
+  // Persist the env choice (non-sensitive). This avoids UI/DOM drift issues.
+  try { localStorage.setItem("t212ApiEnv", state.apiEnv); } catch {}
+
+  // Backup: force radios if they exist
+  const liveEl = document.getElementById("env_live");
+  const demoEl = document.getElementById("env_demo");
+  if (liveEl && demoEl) {
+    liveEl.checked = (state.apiEnv === "live");
+    demoEl.checked = (state.apiEnv === "demo");
+  }
+
+  // Support split-button UI if present
+  const liveBtn = document.getElementById("envLiveBtn");
+  const demoBtn = document.getElementById("envDemoBtn");
+  if (liveBtn && demoBtn) {
+    liveBtn.classList.toggle("active", state.apiEnv === "live");
+    demoBtn.classList.toggle("active", state.apiEnv === "demo");
+    liveBtn.setAttribute("aria-pressed", String(state.apiEnv === "live"));
+    demoBtn.setAttribute("aria-pressed", String(state.apiEnv === "demo"));
+  }
+}
+
+function getEnv() {
+  return (state.apiEnv === "demo") ? "demo" : "live";
+}
+
+function initEnvControl() {
+  // Load persisted env if present
+  try {
+    const saved = String(localStorage.getItem("t212ApiEnv") || "").toLowerCase();
+    if (saved === "demo" || saved === "live") state.apiEnv = saved;
+  } catch {}
+
+  // Wire split-button UI (if present)
+  const liveBtn = document.getElementById("envLiveBtn");
+  const demoBtn = document.getElementById("envDemoBtn");
+  if (liveBtn) liveBtn.addEventListener("click", () => setEnv("live"));
+  if (demoBtn) demoBtn.addEventListener("click", () => setEnv("demo"));
+
+  // Wire radios (if present)
+  const liveEl = document.getElementById("env_live");
+  const demoEl = document.getElementById("env_demo");
+  if (liveEl) liveEl.addEventListener("change", () => { if (liveEl.checked) setEnv("live"); });
+  if (demoEl) demoEl.addEventListener("change", () => { if (demoEl.checked) setEnv("demo"); });
+
+  // Apply state to UI
+  setEnv(state.apiEnv);
 }
 
 function show(el) { el.classList.remove("hidden"); }
@@ -806,9 +864,12 @@ function loadPersistedCredsIfAny() {
     $("apiKey").value = key;
     $("apiSecret").value = secret;
 
+    // Keep a code-owned truth for env as well
+    state.apiEnv = (String(env).toLowerCase() === "demo") ? "demo" : "live";
+
     const liveEl = document.getElementById("env_live");
     const demoEl = document.getElementById("env_demo");
-    if (env === "demo") {
+    if (state.apiEnv === "demo") {
       if (demoEl) demoEl.checked = true;
     } else {
       if (liveEl) liveEl.checked = true;
@@ -825,6 +886,7 @@ async function init() {
   });
   ensureSegStyles();
   loadPersistedCredsIfAny();
+  initEnvControl();
   loadPersistedAnswersIfAny();
 
   $("btnFetchHoldings").addEventListener("click", async () => {
@@ -834,9 +896,7 @@ async function init() {
 
     const key = ($("apiKey").value || "").trim();
     const secret = ($("apiSecret").value || "").trim();
-    const envRadio = document.querySelector('input[name="apiEnv"]:checked');
-    const envName = (envRadio?.value || "live").trim().toLowerCase();
-    const env = (envName === "demo") ? "demo" : "live";
+    const env = getEnv();
 
     // Persist creds + selected env only if the user opted in.
     if (state.rememberDevice) persistCredsIfNeeded(key, secret, env);
