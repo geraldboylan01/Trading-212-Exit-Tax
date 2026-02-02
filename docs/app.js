@@ -127,13 +127,13 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-// Display dates as DDMMYYYY (UTC) everywhere in the UI.
+// Display dates as DD/MM/YYYY (UTC) everywhere in the UI.
 function fmtDate(d) {
   if (!(d instanceof Date) || Number.isNaN(d.getTime())) return "—";
   const dd = pad2(d.getUTCDate());
   const mm = pad2(d.getUTCMonth() + 1);
   const yyyy = String(d.getUTCFullYear());
-  return `${dd}${mm}${yyyy}`;
+  return `${dd}/${mm}/${yyyy}`;
 }
 
 function isLeapYear(y) {
