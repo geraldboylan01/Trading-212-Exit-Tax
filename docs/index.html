@@ -49,11 +49,20 @@
             </div>
 
             <div class="field">
-              <label for="apiEnv">Environment</label>
-              <select id="apiEnv">
-                <option value="live" selected>Live (real account)</option>
-                <option value="demo">Demo (practice account)</option>
-              </select>
+              <label>Environment</label>
+
+              <div class="seg seg-env" role="group" aria-label="Trading 212 environment">
+                <label class="seg-item" for="env_live">
+                  <input type="radio" id="env_live" name="apiEnv" value="live" checked />
+                  <span>Live (real account)</span>
+                </label>
+
+                <label class="seg-item" for="env_demo">
+                  <input type="radio" id="env_demo" name="apiEnv" value="demo" />
+                  <span>Demo (practice account)</span>
+                </label>
+              </div>
+
               <div class="small" style="margin-top: 6px;">If your keys are for a demo account, choose Demo. Live keys won’t work on Demo and vice‑versa.</div>
             </div>
 

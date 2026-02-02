@@ -13,7 +13,7 @@ const EXIT_TAX_RATE = 0.38;
 //   1) ?proxy=https://... (query param)
 //   2) localStorage key "t212ProxyBaseUrl"
 // Leave blank to skip proxy and use docs/data/positions.json (snapshot mode).
-// If a proxy URL is configured, we treat that as live mode and do NOT silently fall back to the snapshot when creds are provided.
+// When a proxy URL is configured and the user provides creds, the app will attempt the proxy and will NOT silently fall back to the snapshot on errors.
 const T212_PROXY_BASE_URL = "https://t212-exit-tax-proxy.geraldboylan.workers.dev";
 
 function getProxyBaseUrl() {
@@ -28,8 +28,6 @@ function getProxyBaseUrl() {
   try {
     const ls = localStorage.getItem("t212ProxyBaseUrl") || "";
     if (ls && ls.startsWith("http")) {
-      // Safety: if someone previously set a localhost override during development,
-      // GitHub Pages will never be able to reach it. Ignore localhost on github.io.
       const isGitHubPages = /(^|\.)github\.io$/i.test(window.location.hostname);
       const isLocalhostOverride = /^(https?:\/\/)?localhost(:\d+)?/i.test(ls);
       if (!(isGitHubPages && isLocalhostOverride)) {
@@ -791,11 +789,12 @@ function loadPersistedAnswersIfAny() {
   } catch {}
 }
 
-function persistCredsIfNeeded(key, secret) {
+function persistCredsIfNeeded(key, secret, env) {
   if (!state.rememberDevice) return;
   try {
     localStorage.setItem("t212ApiKey", key || "");
     localStorage.setItem("t212ApiSecret", secret || "");
+    localStorage.setItem("t212ApiEnv", env || "live");
   } catch {}
 }
 
@@ -803,8 +802,17 @@ function loadPersistedCredsIfAny() {
   try {
     const key = localStorage.getItem("t212ApiKey") || "";
     const secret = localStorage.getItem("t212ApiSecret") || "";
+    const env = localStorage.getItem("t212ApiEnv") || "live";
     $("apiKey").value = key;
     $("apiSecret").value = secret;
+
+    const liveEl = document.getElementById("env_live");
+    const demoEl = document.getElementById("env_demo");
+    if (env === "demo") {
+      if (demoEl) demoEl.checked = true;
+    } else {
+      if (liveEl) liveEl.checked = true;
+    }
   } catch {}
 }
 
@@ -815,7 +823,7 @@ async function init() {
     state.selectedIsin = null;
     renderDashboard();
   });
-
+  ensureSegStyles();
   loadPersistedCredsIfAny();
   loadPersistedAnswersIfAny();
 
@@ -826,9 +834,12 @@ async function init() {
 
     const key = ($("apiKey").value || "").trim();
     const secret = ($("apiSecret").value || "").trim();
+    const envRadio = document.querySelector('input[name="apiEnv"]:checked');
+    const envName = (envRadio?.value || "live").trim().toLowerCase();
+    const env = (envName === "demo") ? "demo" : "live";
 
-    // Phase 1: we accept empty creds but keep UX
-    if (state.rememberDevice) persistCredsIfNeeded(key, secret);
+    // Persist creds + selected env only if the user opted in.
+    if (state.rememberDevice) persistCredsIfNeeded(key, secret, env);
 
     try {
       // Load DB + holdings
@@ -837,49 +848,62 @@ async function init() {
 
       let positions;
 
+      // 1) Try serverless proxy (live/demo), only if proxy URL is configured and creds are present.
       const proxyBase = getProxyBaseUrl();
-      const wantsLive = !!proxyBase;
-      const hasCreds = !!(key && secret);
-
-      // If a proxy is configured, we treat this as the primary (live) path.
-      // IMPORTANT: When creds are provided, do NOT silently fall back to a static snapshot,
-      // otherwise GitHub Pages will appear to “use old data”.
-      if (wantsLive) {
-        if (!hasCreds) {
-          showConnectBanner(
-            "Enter your Trading 212 API key + secret, then click ‘Fetch holdings’.\n" +
-            "(This app fetches holdings via your Cloudflare Worker proxy; we don’t use the static snapshot when live mode is enabled.)"
-          );
-          return;
-        }
-
+      if (proxyBase && key && secret) {
         try {
-          positions = await loadPositionsViaProxy(key, secret, "live");
-          showConnectBanner("Loaded holdings from Trading 212 (via proxy).");
+          positions = await loadPositionsViaProxy(key, secret, env);
+          showConnectBanner(`Loaded holdings from Trading 212 (${env}) via proxy.`);
         } catch (proxyErr) {
           const msg = String(proxyErr?.message || proxyErr || "");
           console.warn("Proxy fetch failed:", proxyErr);
 
-          // Show a clear error and STOP. No snapshot fallback in live mode.
-          showConnectBanner(
-            "Could not load holdings from the Cloudflare Worker proxy.\n" +
-            `Origin: ${window.location.origin}\n` +
-            `Proxy: ${proxyBase}\n` +
-            (/(failed to fetch|cors)/i.test(msg)
-              ? "Likely cause: CORS / preflight blocked. Fix by adding this origin to the Worker allowlist and redeploying."
-              : `Error: ${msg}`)
-          );
+          // CORS failures usually surface as TypeError: Failed to fetch before we get an HTTP status.
+          if (/failed to fetch/i.test(msg) || /cors/i.test(msg)) {
+            showConnectBanner(
+              `Proxy call blocked (likely CORS).\n` +
+              `Origin: ${window.location.origin}\n` +
+              `Proxy: ${proxyBase}\n` +
+              `Fix: add this origin to the Worker ALLOWED_ORIGINS and redeploy.`
+            );
+            return;
+          }
+
+          // If auth fails, the most common cause is selecting the wrong environment for the key.
+          if (/HTTP 401/i.test(msg) || /unauthor/i.test(msg)) {
+            showConnectBanner(
+              `Trading 212 rejected these credentials (401).\n` +
+              `You selected ${env.toUpperCase()}. If these are demo keys, switch Environment to DEMO; if live keys, switch to LIVE.\n` +
+              `Then try again.`
+            );
+            return;
+          }
+
+          showConnectBanner(`Proxy call failed (${env}): ${msg}`);
           return;
         }
-      } else {
-        // No proxy configured: allow static snapshot/demo for offline GitHub Pages friendly mode.
+      }
+
+      // 2) If proxy wasn't attempted (no proxy URL or missing creds), fall back to snapshot/demo.
+      if (!positions) {
+        const proxyBase = getProxyBaseUrl();
+        if (proxyBase && (!key || !secret)) {
+          showConnectBanner("Enter your Trading 212 API key + secret (and choose Live/Demo), then click ‘Fetch holdings’." );
+          return;
+        }
+
         try {
           positions = await loadPositionsFromDocs();
-          showConnectBanner("Loaded holdings from docs/data/positions.json (snapshot mode).");
+          const b = $("connectBanner");
+          b.textContent = "Loaded holdings from docs/data/positions.json (snapshot mode).";
+          b.classList.remove("hidden");
         } catch (err) {
+          // 3) Final fallback: demo
           const demo = await safeLoadMockPositions();
           positions = demo.positions || demo.items || demo;
-          showConnectBanner("Using demo holdings (no proxy configured and snapshot missing)." );
+          const b = $("connectBanner");
+          b.textContent = "Using demo holdings (could not load proxy or snapshot).";
+          b.classList.remove("hidden");
         }
       }
 
