@@ -810,7 +810,7 @@ function renderRightPanel(relevantRows, otherRows) {
       </div>
       <div class="card">
         <div class="label">Start date rule</div>
-        <div class="value">createdAt from Trading 212</div>
+        <div class="value">First date security was purchased</div>
       </div>
       <div class="card">
         <div class="label">Cycle rule</div>
@@ -851,10 +851,18 @@ function renderRightPanel(relevantRows, otherRows) {
             )
         }</div>
       </div>
-      <div class="card">
-        <div class="label">Notes</div>
-        <div class="value">${state.excludedIsins.has(isin) ? "Excluded" : (!isExitTax ? "Not included" : (overdue ? "Action required" : "OK"))}</div>
-      </div>
+      ${(() => {
+        const note = state.excludedIsins.has(isin)
+          ? "Excluded"
+          : (!isExitTax ? "Not included" : (overdue ? "Action required" : "OK"));
+        if (note === "OK") return "";
+        return `
+          <div class="card">
+            <div class="label">Notes</div>
+            <div class="value">${note}</div>
+          </div>
+        `;
+      })()}
     </div>
   `;
 }
