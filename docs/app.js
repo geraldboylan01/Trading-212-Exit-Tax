@@ -86,6 +86,8 @@ const state = {
   instrumentByIsin: new Map(),
   // User overrides: ISINs the user explicitly marks as subject to deemed disposal.
   includedIsins: new Set(),
+  // User overrides: ISINs the user explicitly excludes from deemed disposal calculations.
+  excludedIsins: new Set(),
   // Answers keyed by ISIN for deemed-disposal handling.
   // { paidExitTax: boolean, deemedDisposalValue: number }
   answersByIsin: new Map(),
@@ -99,8 +101,10 @@ const state = {
 function $(id) { return document.getElementById(id); }
 
 const EXIT_TAX_OVERRIDES_KEY = "exitTaxIncludedIsins";
+const EXIT_TAX_EXCLUDES_KEY = "exitTaxExcludedIsins";
 
 function loadExitTaxOverrides() {
+  // Included
   try {
     const raw = localStorage.getItem(EXIT_TAX_OVERRIDES_KEY);
     const arr = raw ? JSON.parse(raw) : [];
@@ -108,21 +112,49 @@ function loadExitTaxOverrides() {
   } catch {
     state.includedIsins = new Set();
   }
+
+  // Excluded
+  try {
+    const raw = localStorage.getItem(EXIT_TAX_EXCLUDES_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    state.excludedIsins = new Set((arr || []).map(normalizeIsin).filter(Boolean));
+  } catch {
+    state.excludedIsins = new Set();
+  }
 }
 
 function persistExitTaxOverrides() {
   try {
     localStorage.setItem(EXIT_TAX_OVERRIDES_KEY, JSON.stringify([...state.includedIsins]));
   } catch {}
+  try {
+    localStorage.setItem(EXIT_TAX_EXCLUDES_KEY, JSON.stringify([...state.excludedIsins]));
+  } catch {}
 }
 
 function includeIsinForExitTax(isin) {
   const norm = normalizeIsin(isin);
   if (!norm) return;
+  state.excludedIsins.delete(norm);
   state.includedIsins.add(norm);
   persistExitTaxOverrides();
   // Ensure something is selected after promoting.
   state.selectedIsin = norm;
+  renderDashboard();
+}
+
+function excludeIsinFromExitTax(isin) {
+  const norm = normalizeIsin(isin);
+  if (!norm) return;
+
+  // Excluding always wins.
+  state.includedIsins.delete(norm);
+  state.excludedIsins.add(norm);
+  persistExitTaxOverrides();
+
+  // If the excluded holding was selected, clear selection.
+  if (state.selectedIsin === norm) state.selectedIsin = null;
+
   renderDashboard();
 }
 
@@ -314,10 +346,9 @@ function hydrateInstrumentDb(dbJson) {
 }
 
 function isExitTaxInstrument(isin) {
-  // Project rule: if ISIN exists in our DB, treat as exit-tax instrument.
-  // Plus: user overrides (includedIsins) are treated as subject to deemed disposal.
   const norm = normalizeIsin(isin);
   if (!norm) return false;
+  if (state.excludedIsins.has(norm)) return false;
   return state.instrumentByIsin.has(norm) || state.includedIsins.has(norm);
 }
 
@@ -727,9 +758,17 @@ function renderHoldingsTable(rows) {
       <td class="num ${gainClass}">${gainLabel} ${money(Math.abs(gain), getCurrency(pos))}</td>
       <td>${next ? fmtDate(next) : "—"}</td>
       <td class="num">${taxCell}</td>
+      <td class="num"><button class="btn btn-ghost" type="button" data-exclude-isin="${escapeHtml(isin)}">Exclude</button></td>
     `;
 
     tbody.appendChild(tr);
+    const exBtn = tr.querySelector('button[data-exclude-isin]');
+    if (exBtn) {
+      exBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        excludeIsinFromExitTax(isin);
+      });
+    }
   }
 }
 
@@ -753,7 +792,7 @@ function renderRightPanel(relevantRows, otherRows) {
   const overdue = isExitTax ? isOverdue(selected) : false;
   const next = isExitTax ? nextDeemedDisposalDate(selected) : null;
 
-  subtitle.textContent = `${selected.ticker || "Holding"} • ${isin}`;
+  subtitle.textContent = `${selected.name || selected.ticker || "Holding"} • ${isin}`;
 
   const tax = isExitTax ? computeTax(selected) : null;
   const needsInfo = isExitTax ? ((tax == null) && !overdue) : false;
@@ -814,7 +853,7 @@ function renderRightPanel(relevantRows, otherRows) {
       </div>
       <div class="card">
         <div class="label">Notes</div>
-        <div class="value">${!isExitTax ? "Not included" : (overdue ? "Action required" : "OK")}</div>
+        <div class="value">${state.excludedIsins.has(isin) ? "Excluded" : (!isExitTax ? "Not included" : (overdue ? "Action required" : "OK"))}</div>
       </div>
     </div>
   `;
