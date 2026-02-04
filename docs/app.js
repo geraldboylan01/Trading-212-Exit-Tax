@@ -946,6 +946,27 @@ async function init() {
   loadPersistedAnswersIfAny();
   loadExitTaxOverrides();
 
+  // Build stamp + DOM sanity check (helps detect old cached HTML)
+  console.log("app.js build: 20260202");
+  try {
+    const mustHave = ["holdingsTbody", "otherTbody", "otherEmpty", "viewDashboard"]; 
+    const missing = mustHave.filter((id) => !document.getElementById(id));
+    if (missing.length) {
+      const msg =
+        "UI mismatch: this app.js expects the NEW dashboard HTML, but these element IDs are missing:\n" +
+        missing.join(", ") +
+        "\n\nYou are likely being served an old index.html (cache) or the wrong path. Hard refresh (Cmd+Shift+R) or open in Private window.";
+      console.error(msg);
+      const b = document.getElementById("connectBanner");
+      if (b) {
+        b.textContent = msg;
+        b.classList.remove("hidden");
+      }
+    }
+  } catch (e) {
+    console.warn("DOM sanity check failed", e);
+  }
+
   $("btnFetchHoldings").addEventListener("click", async () => {
     clearConnectBanner();
 
@@ -1049,9 +1070,12 @@ async function init() {
       // Filter to exit-tax relevant instruments
       const relevant = state.positions.filter(p => isExitTaxInstrument(p.isin));
 
+      // IMPORTANT: do NOT return when none match the DB.
+      // We still want to show the dashboard so the user can include securities manually.
       if (relevant.length === 0) {
-        showConnectBanner("No exit-tax holdings found in demo data (or your DB filter excluded all positions).");
-        return;
+        showConnectBanner(
+          "No holdings matched the exit-tax DB. Showing all holdings under Other securities so you can include them manually."
+        );
       }
 
       // Determine holdings needing info (UX gating)
