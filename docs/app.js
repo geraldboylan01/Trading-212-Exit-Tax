@@ -92,6 +92,7 @@ const state = {
   // { paidExitTax: boolean, deemedDisposalValue: number }
   answersByIsin: new Map(),
   selectedIsin: null,
+  withdrawAmount: "",
   rememberDevice: false,
   chart: null,
   // Single source of truth for account environment (live/demo)
@@ -215,6 +216,7 @@ function addYearsSafeUTC(d, years) {
   return new Date(Date.UTC(targetYear, m, targetDay));
 }
 
+
 function money(n, currency) {
   if (typeof n !== "number" || Number.isNaN(n)) return "—";
   if (currency && typeof currency === "string" && currency.length === 3) {
@@ -225,6 +227,208 @@ function money(n, currency) {
     }
   }
   return new Intl.NumberFormat("en-IE", { maximumFractionDigits: 2 }).format(n);
+}
+
+// ---------- Partial withdrawal calculator ----------
+function getSelectedPosition() {
+  const isin = normalizeIsin(state.selectedIsin);
+  if (!isin) return null;
+  return (state.positions || []).find(p => normalizeIsin(p.isin) === isin) || null;
+}
+
+function getQuantityAvailable(pos) {
+  const q = (
+    pos?.quantityAvailableForTrading ??
+    pos?.quantity_available_for_trading ??
+    pos?.quantity ??
+    0
+  );
+  return (typeof q === "number" && Number.isFinite(q)) ? q : 0;
+}
+
+function getCurrentPrice(pos) {
+  const p = (
+    pos?.currentPrice ??
+    pos?.current_price ??
+    0
+  );
+  return (typeof p === "number" && Number.isFinite(p)) ? p : 0;
+}
+
+function getAveragePricePaid(pos) {
+  const p = (
+    pos?.averagePricePaid ??
+    pos?.average_price_paid
+  );
+  if (typeof p === "number" && Number.isFinite(p) && p >= 0) return p;
+
+  // Fallback to totalCost / quantity if possible
+  const q = (
+    pos?.quantity ??
+    pos?.qty ??
+    0
+  );
+  const tc = getTotalCost(pos);
+  if (typeof q === "number" && Number.isFinite(q) && q > 0 && Number.isFinite(tc) && tc >= 0) {
+    return tc / q;
+  }
+  return 0;
+}
+
+function calcPartialWithdrawal(pos, withdrawalAmount) {
+  const currency = getCurrency(pos);
+  const W = typeof withdrawalAmount === "number" ? withdrawalAmount : Number(withdrawalAmount);
+
+  const isin = normalizeIsin(pos?.isin);
+  const excluded = !!(isin && state.excludedIsins.has(isin));
+  const exitTaxEligible = !!(isin && (state.instrumentByIsin.has(isin) || state.includedIsins.has(isin)));
+
+  // Eligibility / gating
+  if (!isin) return { ok: false, reason: "Select a security to use the calculator." };
+  if (excluded) return { ok: false, reason: "This holding is excluded from exit tax calculations." };
+  if (!exitTaxEligible) return { ok: false, reason: "This holding is not currently treated as exit-taxable." };
+
+  const overdue = isOverdue(pos);
+  if (overdue) return { ok: false, reason: "Overdue deemed disposal — calculator disabled." };
+
+  const info = deemedDisposalInfo(pos);
+  if (info.cyclesCompleted >= 1 && !hasDeemedDisposalValue(pos)) {
+    return { ok: false, reason: "Needs deemed disposal value to estimate — complete the questions screen." };
+  }
+
+  const price = getCurrentPrice(pos);
+  const qAvail = getQuantityAvailable(pos);
+
+  if (!(price > 0)) return { ok: false, reason: "Cannot estimate because the current price is unavailable." };
+  if (!(qAvail > 0)) return { ok: false, reason: "Cannot estimate because no tradable quantity is available." };
+
+  const maxWithdraw = qAvail * price;
+
+  if (!Number.isFinite(W) || W <= 0) {
+    return {
+      ok: true,
+      currency,
+      maxWithdraw,
+      principal: 0,
+      gain: 0,
+      tax: 0,
+      note: "Enter a withdrawal amount to see an estimate.",
+    };
+  }
+
+  // Validate amount against available value
+  const eps = 0.01; // cents tolerance
+  if (W > maxWithdraw + eps) {
+    return {
+      ok: false,
+      currency,
+      maxWithdraw,
+      reason: "Withdrawal exceeds the maximum available value for this holding.",
+    };
+  }
+
+  // Determine cost per unit
+  let costPerUnit = getAveragePricePaid(pos);
+
+  // If rebased (post deemed disposal), approximate cost/unit using rebased total value divided by current quantity.
+  // This is the best we can do without transaction lots or units-at-DD-date.
+  if (hasDeemedDisposalValue(pos)) {
+    const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
+    const qNow = (typeof pos?.quantity === "number" && Number.isFinite(pos.quantity) && pos.quantity > 0) ? pos.quantity : 0;
+    if (ans && Number.isFinite(ans.deemedDisposalValue) && ans.deemedDisposalValue >= 0 && qNow > 0) {
+      costPerUnit = ans.deemedDisposalValue / qNow;
+    }
+  }
+
+  const unitsSold = W / price;
+  const principal = unitsSold * costPerUnit;
+  const gainRaw = W - principal;
+  const gain = Math.max(gainRaw, 0);
+  const tax = gain * EXIT_TAX_RATE;
+
+  return {
+    ok: true,
+    currency,
+    maxWithdraw,
+    principal: Math.max(principal, 0),
+    gain,
+    tax,
+  };
+}
+
+function renderPartialWithdrawal(selectedPos) {
+  const card = document.getElementById("partialWithdrawalCard");
+  if (!card) return;
+
+  const subtitle = document.getElementById("partialWithdrawalSubtitle");
+  const msg = document.getElementById("partialWithdrawalMsg");
+  const input = document.getElementById("withdrawAmount");
+  const maxEl = document.getElementById("withdrawMax");
+  const taxEl = document.getElementById("withdrawTax");
+  const gainEl = document.getElementById("withdrawGain");
+  const principalEl = document.getElementById("withdrawPrincipal");
+
+  // Always show the card on the dashboard; content will guide the user.
+  card.classList.remove("hidden");
+
+  if (!selectedPos) {
+    if (subtitle) subtitle.textContent = "Select an exit-tax holding to estimate exit tax on a partial withdrawal.";
+    if (msg) {
+      msg.textContent = "Select a holding from the list above to use the calculator.";
+      msg.classList.remove("hidden");
+    }
+    if (maxEl) maxEl.textContent = "—";
+    if (taxEl) taxEl.textContent = "—";
+    if (gainEl) gainEl.textContent = "—";
+    if (principalEl) principalEl.textContent = "—";
+    if (input) input.disabled = true;
+    return;
+  }
+
+  const isin = normalizeIsin(selectedPos.isin);
+  const title = `${selectedPos.ticker || "Holding"} • ${isin}`;
+  if (subtitle) subtitle.textContent = `For: ${title}`;
+
+  // Ensure input reflects persisted state
+  if (input) {
+    input.disabled = false;
+    input.value = state.withdrawAmount || "";
+  }
+
+  const amount = Number((state.withdrawAmount || "").trim());
+  const result = calcPartialWithdrawal(selectedPos, amount);
+
+  // Message / disabled state
+  if (!result.ok) {
+    if (msg) {
+      msg.textContent = result.reason || "Cannot estimate.";
+      msg.classList.remove("hidden");
+    }
+    if (input) input.disabled = true;
+    if (maxEl) maxEl.textContent = result.maxWithdraw != null ? `Max: ${money(result.maxWithdraw, result.currency)}` : "—";
+    if (taxEl) taxEl.textContent = "—";
+    if (gainEl) gainEl.textContent = "—";
+    if (principalEl) principalEl.textContent = "—";
+    return;
+  }
+
+  // Hide banner when OK (or only show note text when relevant)
+  if (msg) {
+    if (result.note) {
+      msg.textContent = result.note;
+      msg.classList.remove("hidden");
+    } else {
+      msg.textContent = "";
+      msg.classList.add("hidden");
+    }
+  }
+
+  if (input) input.disabled = false;
+
+  if (maxEl) maxEl.textContent = `Max: ${money(result.maxWithdraw, result.currency)}`;
+  if (taxEl) taxEl.textContent = money(result.tax, result.currency);
+  if (gainEl) gainEl.textContent = money(result.gain, result.currency);
+  if (principalEl) principalEl.textContent = money(result.principal, result.currency);
 }
 
 
@@ -705,6 +909,7 @@ function renderDashboard() {
   }
 
   renderRightPanel(relevant, other);
+  renderPartialWithdrawal(getSelectedPosition());
 }
 
 function renderHoldingsTable(rows) {
@@ -993,10 +1198,19 @@ async function init() {
   loadPersistedAnswersIfAny();
   loadExitTaxOverrides();
 
+  // Partial withdrawal calculator: single listener, minimal updates
+  const withdrawInput = document.getElementById("withdrawAmount");
+  if (withdrawInput) {
+    withdrawInput.addEventListener("input", () => {
+      state.withdrawAmount = String(withdrawInput.value || "");
+      renderPartialWithdrawal(getSelectedPosition());
+    });
+  }
+
   // Build stamp + DOM sanity check (helps detect old cached HTML)
   console.log("app.js build: 20260202");
   try {
-    const mustHave = ["holdingsTbody", "otherTbody", "otherEmpty", "viewDashboard"]; 
+    const mustHave = ["holdingsTbody", "otherTbody", "otherEmpty", "viewDashboard", "partialWithdrawalCard", "withdrawAmount"];
     const missing = mustHave.filter((id) => !document.getElementById(id));
     if (missing.length) {
       const msg =
