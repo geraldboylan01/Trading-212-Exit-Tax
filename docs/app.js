@@ -283,17 +283,23 @@ function getTestScenario(apiKey) {
 }
 
 function loadPositionsFromTestScenario(apiKey, apiSecret) {
-  const scenario = getTestScenario(apiKey);
+  const scenarioKey = String(apiKey || "").trim().toUpperCase();
+  const scenario = TEST_SCENARIOS[scenarioKey] || null;
   if (!scenario) throw new Error("Unknown test scenario key.");
+
   const secret = String(apiSecret || "").trim();
   if (secret !== TEST_SCENARIO_SECRET) {
     throw new Error(`Invalid test secret for ${String(apiKey || "").trim()}.`);
   }
 
-  // Reset per-run transient state so scenarios behave deterministically.
-  state.answersByIsin = new Map();
-  state.selectedIsin = null;
-  state.withdrawAmount = "";
+  // Only reset transient state when switching scenarios.
+  // This preserves rebasing answers if you click Fetch again.
+  if (state.activeScenarioKey !== scenarioKey) {
+    state.answersByIsin = new Map();
+    state.selectedIsin = null;
+    state.withdrawAmount = "";
+    state.activeScenarioKey = scenarioKey;
+  }
 
   return scenario.positions;
 }
@@ -388,6 +394,7 @@ const state = {
   chart: null,
   // Single source of truth for account environment (live/demo)
   apiEnv: "live",
+  activeScenarioKey: null,
 };
 
 function $(id) { return document.getElementById(id); }
@@ -621,13 +628,15 @@ function calcPartialWithdrawal(pos, withdrawalAmount) {
   // Determine cost per unit
   let costPerUnit = getAveragePricePaid(pos);
 
-  // If rebased (post deemed disposal), approximate cost/unit using rebased total value divided by current quantity.
-  // This is the best we can do without transaction lots or units-at-DD-date.
+  // If rebased (post deemed disposal), approximate cost/unit using the effective cost base divided by current quantity.
+  // Effective base uses max(original totalCost, deemedDisposalValue) to respect the loss-at-DD rule.
   if (hasDeemedDisposalValue(pos)) {
     const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
     const qNow = (typeof pos?.quantity === "number" && Number.isFinite(pos.quantity) && pos.quantity > 0) ? pos.quantity : 0;
-    if (ans && Number.isFinite(ans.deemedDisposalValue) && ans.deemedDisposalValue >= 0 && qNow > 0) {
-      costPerUnit = ans.deemedDisposalValue / qNow;
+    const ddValue = ans?.deemedDisposalValue;
+    if (Number.isFinite(ddValue) && ddValue >= 0 && qNow > 0) {
+      const effectiveBase = Math.max(getTotalCost(pos), ddValue);
+      costPerUnit = effectiveBase / qNow;
     }
   }
 
@@ -985,14 +994,19 @@ function needsQuestions(pos) {
 }
 
 function taxableGainToday(pos) {
-  // If we have deemed disposal value (rebased cost), use it.
+  const totalCost = getTotalCost(pos);
+
+  // If we have deemed disposal value (rebased cost), use it,
+  // but never below original total cost (loss-at-DD should keep the higher original base).
   if (hasDeemedDisposalValue(pos)) {
     const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
-    return Math.max(getCurrentValue(pos) - ans.deemedDisposalValue, 0);
+    const ddValue = ans?.deemedDisposalValue;
+    const effectiveBase = Math.max(totalCost, Number(ddValue));
+    return Math.max(getCurrentValue(pos) - effectiveBase, 0);
   }
 
   // Otherwise (pre-first-DD), mirror Python CLI Phase 1:
-  return Math.max(getCurrentValue(pos) - getTotalCost(pos), 0);
+  return Math.max(getCurrentValue(pos) - totalCost, 0);
 }
 
 function computeTax(pos) {
