@@ -183,6 +183,45 @@
       </aside>
     </div>
 
+    <!-- PARTIAL WITHDRAWAL CALCULATOR (below Holdings + Details) -->
+    <div id="partialWithdrawalCard" class="panel hidden" style="max-width: 1200px; margin: 12px auto 0;">
+      <div class="panel-header">
+        <h1 style="margin:0;">Partial withdrawal calculator</h1>
+        <div id="partialWithdrawalSubtitle" class="summary">Select an exit-tax holding to estimate exit tax on a partial withdrawal.</div>
+      </div>
+
+      <div class="panel-body">
+        <div id="partialWithdrawalMsg" class="banner banner-warn hidden" aria-live="polite"></div>
+
+        <div class="form form-wide" style="max-width: 640px;">
+          <div class="field">
+            <label for="withdrawAmount">Withdrawal amount</label>
+            <input id="withdrawAmount" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" autocomplete="off" />
+            <div class="small" id="withdrawMax" style="margin-top: 6px;">—</div>
+          </div>
+        </div>
+
+        <div class="kv" style="margin-top: 10px;">
+          <div class="card">
+            <div class="label">Estimated exit tax</div>
+            <div class="value" id="withdrawTax">—</div>
+          </div>
+          <div class="card">
+            <div class="label">Gain portion</div>
+            <div class="value" id="withdrawGain">—</div>
+          </div>
+          <div class="card">
+            <div class="label">Principal portion</div>
+            <div class="value" id="withdrawPrincipal">—</div>
+          </div>
+        </div>
+
+        <div class="small" style="margin-top: 10px;">
+          Estimate uses today’s price and average cost, and ignores any broker fees/spread.
+        </div>
+      </div>
+    </div>
+
     <div class="footer">
       <div class="disclaimer">Prototype UI. Not tax advice. Exit tax rules can be complex; confirm with Revenue guidance or a professional adviser.</div>
     </div>
