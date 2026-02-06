@@ -1546,6 +1546,10 @@ async function init() {
 
     const key = ($("apiKey").value || "").trim();
     const secret = ($("apiSecret").value || "").trim();
+    // If user is not using a test scenario key, ensure we exit test-mode state tracking.
+    if (!isTestScenarioKey(key)) {
+      state.activeScenarioKey = null;
+    }
     const checkedEnv = document.querySelector('input[name="apiEnv"]:checked')?.value;
     if (checkedEnv) setEnv(checkedEnv);
     const env = getEnv();
