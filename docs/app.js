@@ -341,8 +341,14 @@ function calcPartialWithdrawal(pos, withdrawalAmount) {
   }
 
   const unitsSold = W / price;
-  const principal = unitsSold * costPerUnit;
-  const gainRaw = W - principal;
+
+  // Allocated cost (principal portion) based on cost per unit.
+  // When a holding is at a loss, allocated cost can exceed proceeds.
+  // For display, cap principal at the withdrawal amount so principal never exceeds W.
+  const principalRaw = unitsSold * costPerUnit;
+  const principal = Math.min(W, Math.max(principalRaw, 0));
+
+  const gainRaw = W - principalRaw;
   const gain = Math.max(gainRaw, 0);
   const tax = gain * EXIT_TAX_RATE;
 
@@ -350,7 +356,7 @@ function calcPartialWithdrawal(pos, withdrawalAmount) {
     ok: true,
     currency,
     maxWithdraw,
-    principal: Math.max(principal, 0),
+    principal,
     gain,
     tax,
   };
