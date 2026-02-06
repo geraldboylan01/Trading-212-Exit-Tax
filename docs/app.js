@@ -1256,12 +1256,22 @@ function renderHoldingsTable(rows) {
     const overdue = isOverdue(pos);
 
     let taxCell = "";
+    let tax = null;
     if (overdue) {
       taxCell = `<span class="neg">Overdue</span>`;
     } else {
-      const tax = computeTax(pos);
+      tax = computeTax(pos);
       if (tax == null) taxCell = `<span class="muted">Needs info</span>`;
       else taxCell = `${money(tax, getCurrency(pos))}`;
+    }
+
+    let taxableGainLine = "";
+    if (hasDeemedDisposalValue(pos) && !overdue && tax != null) {
+      const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
+      const ddValue = ans?.deemedDisposalValue;
+      const effectiveBase = Math.max(getTotalCost(pos), Number(ddValue));
+      const taxableGain = Math.max(getCurrentValue(pos) - effectiveBase, 0);
+      taxableGainLine = `<div style="color: var(--muted); font-size: 12px; margin-top: 4px;">Taxable gain: ${money(taxableGain, getCurrency(pos))}</div>`;
     }
 
     tr.innerHTML = `
@@ -1271,7 +1281,7 @@ function renderHoldingsTable(rows) {
       </td>
       <td>${escapeHtml(isin)}</td>
       <td class="num">${money(getCurrentValue(pos), getCurrency(pos))}</td>
-      <td class="num ${gainClass}">${gainLabel} ${money(Math.abs(gain), getCurrency(pos))}</td>
+      <td class="num ${gainClass}">${gainLabel} ${money(Math.abs(gain), getCurrency(pos))}${taxableGainLine}</td>
       <td>${next ? fmtDate(next) : "—"}</td>
       <td class="num">${taxCell}</td>
       <td class="num"><button class="btn btn-ghost" type="button" data-exclude-isin="${escapeHtml(isin)}">Exclude</button></td>
