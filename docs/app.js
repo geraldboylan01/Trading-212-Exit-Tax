@@ -5,7 +5,298 @@
 // Later (Phase 2), btnFetchHoldings will call the Trading212 API and build the same "positions" shape.
 
 
+
 const EXIT_TAX_RATE = 0.38;
+
+// ---------- Test scenarios (local, deterministic) ----------
+// Goal: allow targeted testing without touching the live proxy flow.
+// If the user enters a known TEST_* API key, we load a local scenario instead of calling the proxy.
+// Secret is intentionally simple so you can type it quickly.
+const TEST_SCENARIO_SECRET = "TEST123";
+
+// IMPORTANT: createdAt strings are intentionally in the Trading212 ISO format you shared,
+// including milliseconds + timezone offset (e.g., +02:00).
+// These are raw Trading212-shaped positions (instrument + walletImpact + createdAt etc.).
+const TEST_SCENARIOS = {
+  // Fresh holding (recent purchase) — should NOT be near deemed disposal.
+  "TEST_NEW_BUY_VWCE": {
+    label: "New buy (VWCE ~2 weeks ago)",
+    positions: [
+      {
+        instrument: {
+          ticker: "VWCEd_EQ",
+          name: "Vanguard FTSE All-World (Acc)",
+          isin: "IE00BK5BQT80",
+          currency: "EUR",
+        },
+        createdAt: "2026-01-22T10:05:14.015+02:00",
+        quantity: 33.7700932,
+        quantityAvailableForTrading: 33.0894755626,
+        quantityInPies: 0,
+        currentPrice: 147.72,
+        averagePricePaid: 148.06000002,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 5000.0,
+          currentValue: 4988.52,
+          unrealizedProfitLoss: -11.48,
+          fxImpact: null,
+        },
+      },
+    ],
+  },
+
+  // Imminent deemed disposal (7y 11m ago) — should show a next DD date soon.
+  "TEST_IMMINENT_8Y": {
+    label: "Imminent 8-year DD (VWCE ~7y11m ago)",
+    positions: [
+      {
+        instrument: {
+          ticker: "VWCEd_EQ",
+          name: "Vanguard FTSE All-World (Acc)",
+          isin: "IE00BK5BQT80",
+          currency: "EUR",
+        },
+        // ~7y 11m before Feb 6, 2026 (approx). Exactness not critical for the UI; cycle math is exact by anniversary.
+        createdAt: "2018-03-06T10:05:14.015+02:00",
+        quantity: 50.0,
+        quantityAvailableForTrading: 50.0,
+        quantityInPies: 0,
+        currentPrice: 150.0,
+        averagePricePaid: 100.0,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 5000.0,
+          currentValue: 7500.0,
+          unrealizedProfitLoss: 2500.0,
+          fxImpact: null,
+        },
+      },
+    ],
+  },
+
+  // Overdue case (>8y, outside payment window) — should force the questions screen and mark overdue.
+  "TEST_OVERDUE_9Y": {
+    label: "Overdue (>8y) — needs paid? + DD value",
+    positions: [
+      {
+        instrument: {
+          ticker: "IWDA_EQ",
+          name: "iShares Core MSCI World UCITS ETF (Acc)",
+          isin: "IE00B4L5Y983",
+          currency: "EUR",
+        },
+        createdAt: "2016-01-10T10:05:14.015+02:00",
+        quantity: 60.0,
+        quantityAvailableForTrading: 60.0,
+        quantityInPies: 0,
+        currentPrice: 90.0,
+        averagePricePaid: 50.0,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 3000.0,
+          currentValue: 5400.0,
+          unrealizedProfitLoss: 2400.0,
+          fxImpact: null,
+        },
+      },
+    ],
+  },
+
+  // Mixed portfolio: new + imminent + overdue together.
+  "TEST_MIXED_PORTFOLIO": {
+    label: "Mixed: new + imminent + overdue",
+    positions: [
+      {
+        instrument: {
+          ticker: "VWCEd_EQ",
+          name: "Vanguard FTSE All-World (Acc)",
+          isin: "IE00BK5BQT80",
+          currency: "EUR",
+        },
+        createdAt: "2026-01-22T10:05:14.015+02:00",
+        quantity: 10.0,
+        quantityAvailableForTrading: 10.0,
+        quantityInPies: 0,
+        currentPrice: 147.72,
+        averagePricePaid: 148.06,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 1480.6,
+          currentValue: 1477.2,
+          unrealizedProfitLoss: -3.4,
+          fxImpact: null,
+        },
+      },
+      {
+        instrument: {
+          ticker: "IWDA_EQ",
+          name: "iShares Core MSCI World UCITS ETF (Acc)",
+          isin: "IE00B4L5Y983",
+          currency: "EUR",
+        },
+        createdAt: "2018-03-06T10:05:14.015+02:00",
+        quantity: 25.0,
+        quantityAvailableForTrading: 25.0,
+        quantityInPies: 0,
+        currentPrice: 90.0,
+        averagePricePaid: 60.0,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 1500.0,
+          currentValue: 2250.0,
+          unrealizedProfitLoss: 750.0,
+          fxImpact: null,
+        },
+      },
+      {
+        instrument: {
+          ticker: "EIMI_EQ",
+          name: "iShares Core MSCI EM IMI UCITS ETF (Acc)",
+          isin: "IE00BKM4GZ66",
+          currency: "EUR",
+        },
+        createdAt: "2016-01-10T10:05:14.015+02:00",
+        quantity: 80.0,
+        quantityAvailableForTrading: 80.0,
+        quantityInPies: 0,
+        currentPrice: 30.0,
+        averagePricePaid: 20.0,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 1600.0,
+          currentValue: 2400.0,
+          unrealizedProfitLoss: 800.0,
+          fxImpact: null,
+        },
+      },
+    ],
+  },
+
+  // Non-exit-tax security included alongside an ETF to verify filtering into "Other securities".
+  "TEST_NON_EXIT_TAX_FILTER": {
+    label: "ETF + non-exit-tax stock (filter test)",
+    positions: [
+      {
+        instrument: {
+          ticker: "VWCEd_EQ",
+          name: "Vanguard FTSE All-World (Acc)",
+          isin: "IE00BK5BQT80",
+          currency: "EUR",
+        },
+        createdAt: "2024-02-01T10:05:14.015+02:00",
+        quantity: 20.0,
+        quantityAvailableForTrading: 20.0,
+        quantityInPies: 0,
+        currentPrice: 140.0,
+        averagePricePaid: 110.0,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 2200.0,
+          currentValue: 2800.0,
+          unrealizedProfitLoss: 600.0,
+          fxImpact: null,
+        },
+      },
+      {
+        instrument: {
+          ticker: "AAPL_US",
+          name: "Apple Inc",
+          isin: "US0378331005",
+          currency: "USD",
+        },
+        createdAt: "2025-11-15T10:05:14.015+02:00",
+        quantity: 5.0,
+        quantityAvailableForTrading: 5.0,
+        quantityInPies: 0,
+        currentPrice: 200.0,
+        averagePricePaid: 150.0,
+        walletImpact: {
+          currency: "USD",
+          totalCost: 750.0,
+          currentValue: 1000.0,
+          unrealizedProfitLoss: 250.0,
+          fxImpact: null,
+        },
+      },
+    ],
+  },
+
+  // Exclude action test: two exit-tax ETFs so you can exclude one and watch totals change.
+  "TEST_EXCLUDE_ACTION": {
+    label: "Exclude button test (2 ETFs)",
+    positions: [
+      {
+        instrument: {
+          ticker: "VWCEd_EQ",
+          name: "Vanguard FTSE All-World (Acc)",
+          isin: "IE00BK5BQT80",
+          currency: "EUR",
+        },
+        createdAt: "2021-06-01T10:05:14.015+02:00",
+        quantity: 15.0,
+        quantityAvailableForTrading: 15.0,
+        quantityInPies: 0,
+        currentPrice: 145.0,
+        averagePricePaid: 100.0,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 1500.0,
+          currentValue: 2175.0,
+          unrealizedProfitLoss: 675.0,
+          fxImpact: null,
+        },
+      },
+      {
+        instrument: {
+          ticker: "IWDA_EQ",
+          name: "iShares Core MSCI World UCITS ETF (Acc)",
+          isin: "IE00B4L5Y983",
+          currency: "EUR",
+        },
+        createdAt: "2021-06-01T10:05:14.015+02:00",
+        quantity: 10.0,
+        quantityAvailableForTrading: 10.0,
+        quantityInPies: 0,
+        currentPrice: 95.0,
+        averagePricePaid: 70.0,
+        walletImpact: {
+          currency: "EUR",
+          totalCost: 700.0,
+          currentValue: 950.0,
+          unrealizedProfitLoss: 250.0,
+          fxImpact: null,
+        },
+      },
+    ],
+  },
+};
+
+function isTestScenarioKey(apiKey) {
+  const k = String(apiKey || "").trim().toUpperCase();
+  return !!(k && Object.prototype.hasOwnProperty.call(TEST_SCENARIOS, k));
+}
+
+function getTestScenario(apiKey) {
+  const k = String(apiKey || "").trim().toUpperCase();
+  return TEST_SCENARIOS[k] || null;
+}
+
+function loadPositionsFromTestScenario(apiKey, apiSecret) {
+  const scenario = getTestScenario(apiKey);
+  if (!scenario) throw new Error("Unknown test scenario key.");
+  const secret = String(apiSecret || "").trim();
+  if (secret !== TEST_SCENARIO_SECRET) {
+    throw new Error(`Invalid test secret for ${String(apiKey || "").trim()}.`);
+  }
+
+  // Reset per-run transient state so scenarios behave deterministically.
+  state.answersByIsin = new Map();
+  state.selectedIsin = null;
+  state.withdrawAmount = "";
+
+  return scenario.positions;
+}
 
 // Phase 2 (serverless proxy): set this to your deployed Worker URL.
 // Example: "https://t212-exit-tax-proxy.your-subdomain.workers.dev"
@@ -1214,7 +1505,7 @@ async function init() {
   }
 
   // Build stamp + DOM sanity check (helps detect old cached HTML)
-  console.log("app.js build: 20260202");
+  console.log("app.js build: 20260206-test-scenarios");
   try {
     const mustHave = ["holdingsTbody", "otherTbody", "otherEmpty", "viewDashboard", "partialWithdrawalCard", "withdrawAmount"];
     const missing = mustHave.filter((id) => !document.getElementById(id));
@@ -1255,9 +1546,28 @@ async function init() {
 
       let positions;
 
+      // 0) Targeted local test scenarios (do NOT touch proxy flow unless the API key matches a scenario).
+      // Usage:
+      //   API key:   TEST_NEW_BUY_VWCE (or any key in TEST_SCENARIOS)
+      //   Secret:    TEST123
+      // Environment: ignored for test mode
+      if (isTestScenarioKey(key)) {
+        try {
+          positions = loadPositionsFromTestScenario(key, secret);
+          const scenario = getTestScenario(key);
+          showConnectBanner(
+            `TEST MODE: ${scenario?.label || key} — loaded local scenario holdings (no API call).\n` +
+            `Tip: Use secret ${TEST_SCENARIO_SECRET}`
+          );
+        } catch (testErr) {
+          showConnectBanner(String(testErr?.message || testErr || "Test scenario error."));
+          return;
+        }
+      }
+
       // 1) Try serverless proxy (live/demo), only if proxy URL is configured and creds are present.
       const proxyBase = getProxyBaseUrl();
-      if (proxyBase && key && secret) {
+      if (!positions && proxyBase && key && secret) {
         try {
           positions = await loadPositionsViaProxy(key, secret, env);
           showConnectBanner(`Loaded holdings from Trading 212 (${env}) via proxy.`);
@@ -1405,7 +1715,7 @@ async function safeLoadMockPositions() {
       positions: [
         {
           instrument: { isin: "IE00BK5BQT80", ticker: "VWCE", name: "Vanguard FTSE All-World UCITS ETF (Acc)" },
-          createdAt: "2019-02-10T00:00:00Z",
+          createdAt: "2019-02-10T10:05:14.015+02:00",
           walletImpact: { totalCost: 10000, currentValue: 13750, unrealizedProfitLoss: 3750, currency: "EUR" },
           // Keep legacy fields for compatibility:
           name: "Vanguard FTSE All-World UCITS ETF (Acc)",
@@ -1417,7 +1727,7 @@ async function safeLoadMockPositions() {
         },
         {
           instrument: { isin: "IE00B4L5Y983", ticker: "IWDA", name: "iShares Core MSCI World UCITS ETF (Acc)" },
-          createdAt: "2016-05-20T00:00:00Z",
+          createdAt: "2016-05-20T10:05:14.015+02:00",
           walletImpact: { totalCost: 9000, currentValue: 8200, unrealizedProfitLoss: -800, currency: "EUR" },
           name: "iShares Core MSCI World UCITS ETF (Acc)",
           ticker: "IWDA",
