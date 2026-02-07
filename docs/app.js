@@ -587,7 +587,7 @@ function calcPartialWithdrawal(pos, withdrawalAmount) {
   if (!exitTaxEligible) return { ok: false, reason: "This holding is not currently treated as exit-taxable." };
 
   const overdue = isOverdue(pos);
-  if (overdue) return { ok: false, reason: "Overdue deemed disposal — calculator disabled." };
+  if (overdue) return { ok: false, reason: "Past deemed disposal (unpaid) — calculator disabled." };
 
   const info = deemedDisposalInfo(pos);
   if (info.cyclesCompleted >= 1 && !hasDeemedDisposalValue(pos)) {
@@ -971,13 +971,11 @@ function isOverdue(pos) {
   const info = deemedDisposalInfo(pos);
   if (info.cyclesCompleted < 1) return false;
 
-  // If still within payment window, not overdue.
-  if (info.inPaymentWindow) return false;
-
   const ans = state.answersByIsin.get(normalizeIsin(pos.isin));
   const paid = !!ans?.paidExitTax;
 
-  // Outside payment window and not paid -> overdue.
+  // Flag as soon as the deemed disposal date has passed and the user indicates NOT paid.
+  // Pay & File timing is informational only (used for wording/tooltip).
   return !paid;
 }
 
@@ -1061,7 +1059,7 @@ function renderOverdueQuestions(positionsNeedingInfo) {
     const overdueNow = isOverdue(pos);
 
     const guidance = overdueNow
-      ? `This holding appears to be past its deemed disposal date and outside the payment window (Pay & File deadline ${deadlineStr}). If you have not paid exit tax for the deemed disposal on ${lastDdStr}, you may be overdue — consider seeking professional tax advice.`
+      ? `This holding has passed its deemed disposal date (${lastDdStr}) and you indicated exit tax has not been paid. This tool intentionally does not estimate tax for past deemed disposals to avoid being relied upon for filing. Pay & File for that tax year is generally due by ${deadlineStr}. Consider seeking professional tax advice.`
       : `This holding has passed a deemed disposal date (${lastDdStr}). To calculate correctly, we need the market value of your holding on that deemed disposal date.`;
 
     const card = document.createElement("div");
@@ -1092,7 +1090,7 @@ function renderOverdueQuestions(positionsNeedingInfo) {
             </label>
           </div>
 
-          <div class="small">If you have not paid and the deadline has passed (${escapeHtml(deadlineStr)}), this may be overdue.</div>
+          <div class="small">If you have not paid, we will flag this holding and will not estimate tax for it. (Pay & File is generally due by ${escapeHtml(deadlineStr)}.)</div>
         </div>
 
         <div class="field">
@@ -1183,7 +1181,7 @@ function renderDashboard() {
     `Value ${money(totalValue, singleCcy)} • ` +
     `Net P/L ${money(totalPL, singleCcy)} • ` +
     `Est. exit tax today ${money(totalTax, singleCcy)} • ` +
-    `${overdueCount} overdue` +
+    `${overdueCount} past DD (unpaid)` +
     (needsInfoCount ? ` • ${needsInfoCount} needs info` : "") +
     (singleCcy ? "" : " • Mixed currency") +
     (other.length ? ` • ${other.length} other securities` : "");
@@ -1259,7 +1257,8 @@ function renderHoldingsTable(rows) {
     let taxCell = "";
     let tax = null;
     if (overdue) {
-      taxCell = `<span class="neg">Overdue</span>`;
+      const tip = escapeHtml(pastDdTooltipText(pos));
+      taxCell = `<span class="neg" title="${tip}">Past deemed disposal (unpaid)</span>`;
     } else {
       tax = computeTax(pos);
       if (tax == null) taxCell = `<span class="muted">Needs info</span>`;
@@ -1365,12 +1364,12 @@ function renderRightPanel(relevantRows, otherRows) {
       </div>
       <div class="card">
         <div class="label">Exit tax (if today)</div>
-        <div class="value">${isExitTax ? (overdue ? `<span class="neg">Overdue</span>` : (needsInfo ? `<span class="muted">Needs info</span>` : money(tax, getCurrency(selected)))) : "N/A"}</div>
+        <div class="value">${isExitTax ? (overdue ? `<span class=\"neg\" title=\"${escapeHtml(pastDdTooltipText(selected))}\">Past deemed disposal (unpaid)</span>` : (needsInfo ? `<span class=\"muted\">Needs info</span>` : money(tax, getCurrency(selected)))) : "N/A"}</div>
         <div class="small">${
           !isExitTax
             ? "This security is not currently treated as subject to deemed disposal. If it should be, click Include in the Other securities table."
             : (overdue
-              ? "If the payment deadline has passed and you have not paid exit tax, consider seeking professional advice."
+              ? "This holding is marked ‘Past deemed disposal (unpaid)’. We intentionally do not estimate tax for past deemed disposals to avoid filing reliance. Review your records / seek advice."
               : (needsInfo
                 ? "We need the holding value on the deemed disposal date to estimate tax since that date."
                 : (taxableGainToday(selected) <= 0 ? "No exit tax is estimated where taxable gain is zero." : "")
@@ -1768,6 +1767,17 @@ async function safeLoadMockPositions() {
       ]
     };
   }
+}
+
+function pastDdTooltipText(pos) {
+  const info = deemedDisposalInfo(pos);
+  const lastDdStr = info.lastDd ? fmtDate(info.lastDd) : "—";
+  const deadlineStr = info.paymentDeadline ? fmtDate(info.paymentDeadline) : "—";
+  return (
+    `This holding has passed an 8-year deemed disposal date (${lastDdStr}) and you indicated exit tax has not been paid. ` +
+    `This tool intentionally does not estimate tax for past deemed-disposal events to avoid being relied upon for filing. ` +
+    `Review your records / seek professional advice. Pay & File for that tax year is generally due by ${deadlineStr}.`
+  );
 }
 
 function escapeHtml(s) {
