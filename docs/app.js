@@ -946,10 +946,11 @@ function deemedDisposalInfo(pos) {
   const lastDd = cyclesCompleted >= 1 ? addYearsSafeUTC(start, cyclesCompleted * 8) : null;
   const nextDd = addYearsSafeUTC(start, (cyclesCompleted + 1) * 8);
 
-  // Per your UX rule: if DD happened earlier this year, payment may not be due until end of Oct.
-  // Using Oct 31 of the deemed-disposal YEAR as the “still OK” window.
+  // Pay & File for individuals is generally due on 31 Oct in the *following* year (tax year = DD year).
+  // We use 31 Oct of the year after the deemed-disposal date as the conservative “still OK” window.
+  // (ROS often grants an extension into mid-November, but we do not model that here.)
   const paymentDeadline = lastDd
-    ? new Date(Date.UTC(lastDd.getUTCFullYear(), 9, 31)) // Oct=9 (0-indexed)
+    ? new Date(Date.UTC(lastDd.getUTCFullYear() + 1, 9, 31)) // Oct=9 (0-indexed)
     : null;
 
   const inPaymentWindow = !!(lastDd && asOf.getTime() <= paymentDeadline.getTime());
@@ -1060,7 +1061,7 @@ function renderOverdueQuestions(positionsNeedingInfo) {
     const overdueNow = isOverdue(pos);
 
     const guidance = overdueNow
-      ? `This holding appears to be past its deemed disposal date and outside the payment window (deadline ${deadlineStr}). If you have not paid exit tax for the deemed disposal on ${lastDdStr}, you may be overdue — consider seeking professional tax advice.`
+      ? `This holding appears to be past its deemed disposal date and outside the payment window (Pay & File deadline ${deadlineStr}). If you have not paid exit tax for the deemed disposal on ${lastDdStr}, you may be overdue — consider seeking professional tax advice.`
       : `This holding has passed a deemed disposal date (${lastDdStr}). To calculate correctly, we need the market value of your holding on that deemed disposal date.`;
 
     const card = document.createElement("div");
@@ -1191,7 +1192,7 @@ function renderDashboard() {
   const banner = $("overdueBanner");
   if (overdueCount > 0) {
     banner.textContent =
-      "Overdue deemed disposal detected for one or more holdings. This tool will not estimate tax for overdue holdings. Consider seeking professional tax advice.";
+      "Overdue deemed disposal detected for one or more holdings (based on Pay & File timing). This tool will not estimate tax for overdue holdings. Consider seeking professional tax advice.";
     show(banner);
   } else if (needsInfoCount > 0) {
     banner.textContent =
